@@ -1,11 +1,11 @@
-# OKEx 量化交易系统
+# CryptoQuant 量化交易系统
 
-这是一个基于 OKEx API 的量化交易系统，支持多种交易策略和工具。系统采用模块化设计，包含多个独立的应用程序，共享底层的交易和数据处理组件。
+这是一个加密货币量化交易系统，目前支持 OKEx 交易所 API，提供多种交易策略和工具。系统采用模块化设计，包含多个独立的应用程序，共享底层的交易和数据处理组件。
 
 ## 项目结构
 
 ```
-okex/
+cryptoquant/
 ├── apps/                      # 应用程序目录
 │   ├── funding_arbitrage/     # 资金费率套利策略
 │   ├── price/                 # 价格监控工具
@@ -23,7 +23,7 @@ okex/
 │       └── okex/              # OKEx交易所适配器
 │           └── trader.py      # OKEx交易执行器
 ├── config/                    # 配置文件目录
-│   ├── api.json               # OKEx API通用配置
+│   ├── api.json               # 交易所API通用配置
 │   ├── funding_arbitrage.json # 资金费率套利特定配置
 │   ├── price.json             # 价格监控特定配置
 │   ├── trader_tools.json      # 交易工具特定配置
@@ -47,7 +47,7 @@ TradingView信号追踪器可以接收并执行来自TradingView的交易信号�
 
 **使用方法**:
 ```bash
-python -m okex.apps.tradingview_signal_tracker.main
+python -m cryptoquant.apps.tradingview_signal_tracker.main
 ```
 
 ### 资金费率套利
@@ -62,7 +62,7 @@ python -m okex.apps.tradingview_signal_tracker.main
 
 **使用方法**:
 ```bash
-python -m okex.apps.funding_arbitrage.funding_arbitrage
+python -m cryptoquant.apps.funding_arbitrage.funding_arbitrage
 ```
 
 ### 交易工具集
@@ -77,9 +77,9 @@ python -m okex.apps.funding_arbitrage.funding_arbitrage
 
 **使用方法**:
 ```bash
-python -m okex.apps.trader_tools.trader_tools --mode order --symbols btc eth --amount 100 --leverage 3 --side buy --price-type market
-python -m okex.apps.trader_tools.trader_tools --mode close --symbols btc eth --price-type market
-python -m okex.apps.trader_tools.trader_tools --mode balance
+python -m cryptoquant.apps.trader_tools.trader_tools --mode order --symbols btc eth --amount 100 --leverage 3 --side buy --price-type market
+python -m cryptoquant.apps.trader_tools.trader_tools --mode close --symbols btc eth --price-type market
+python -m cryptoquant.apps.trader_tools.trader_tools --mode balance
 ```
 
 ## 共享组件
@@ -136,7 +136,7 @@ position_mgr.close_position("BTC-USDT-SWAP", 55000)
 
 ### 交易执行器 (trader.py)
 
-提供与OKEx交易所的交互功能，如下单、查询价格、获取余额等。
+提供与交易所的交互功能，如下单、查询价格、获取余额等。目前支持 OKEx 交易所。
 
 ```python
 from src.exchange.okex.trader import OKExTrader
@@ -165,7 +165,7 @@ price = trader.get_mark_price("BTC-USDT-SWAP")
 
 ### 配置文件组织
 
-- **api.json**: 包含OKEx API的通用配置，如API密钥、密码等
+- **api.json**: 包含交易所API的通用配置，如API密钥、密码等
 - **<app_name>.json**: 每个应用程序的特定配置文件，包含该应用的特殊参数
 
 这种组织方式避免了在多个应用中重复配置API信息，使配置更加清晰和易于维护。
@@ -174,7 +174,8 @@ price = trader.get_mark_price("BTC-USDT-SWAP")
 
 ```json
 {
-  "okex": {
+  "exchange": {
+    "type": "okex",
     "api_key": "your_api_key",
     "secret_key": "your_secret_key",
     "passphrase": "your_passphrase",
@@ -223,8 +224,8 @@ config = get_app_config("tradingview_signal_tracker")
 
 1. 克隆仓库:
 ```bash
-git clone https://github.com/yourusername/okex.git
-cd okex
+git clone https://github.com/Tightfist/cryptoquant.git
+cd cryptoquant
 ```
 
 2. 安装依赖:
@@ -234,7 +235,7 @@ pip install -r requirements.txt
 
 3. 配置API密钥:
    - 复制 `config/api.example.json` 为 `config/api.json`
-   - 编辑 `config/api.json` 文件，填入你的OKEx API密钥
+   - 编辑 `config/api.json` 文件，填入你的交易所API密钥
    - 复制并编辑各应用程序的配置文件
 
 ## 注意事项

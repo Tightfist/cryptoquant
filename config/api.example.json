@@ -1,5 +1,6 @@
 {
-  "okex": {
+  "exchange": {
+    "type": "okex",
     "api_key": "your_api_key_here",
     "secret_key": "your_secret_key_here",
     "passphrase": "your_passphrase_here",
