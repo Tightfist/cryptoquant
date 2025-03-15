@@ -12,7 +12,6 @@ TradingView信号追踪器
 
 import os
 import sys
-import yaml
 import asyncio
 import logging
 import signal
@@ -27,16 +26,30 @@ from src.common.event_loop import AsyncEventLoop
 from src.common.data_cache import DataCache, OKExDataCache
 from src.common.position_manager import PositionManager
 from src.exchange.okex.trader import OKExTrader
+from src.common.config_loader import get_app_config  # 导入统一的配置加载函数
 
 from apps.tradingview_signal_tracker.signal_processor import SignalProcessor
 from apps.tradingview_signal_tracker.market_client import MarketDataSubscriber
 from apps.tradingview_signal_tracker.strategy import TradingViewSignalStrategy
 
-def load_config() -> Dict[str, Any]:
-    """加载配置文件"""
-    config_path = os.path.join(os.path.dirname(__file__), "config.yaml")
-    with open(config_path, 'r', encoding='utf-8') as f:
-        return yaml.safe_load(f)
+# 应用名称
+APP_NAME = "tradingview_signal_tracker"
+
+def main():
+    """主函数"""
+    try:
+        # 使用统一的配置加载函数
+        config = get_app_config(APP_NAME)
+        
+        # 创建并运行应用
+        app = TradingViewSignalApp(config)
+        app.run()
+    except KeyboardInterrupt:
+        print("用户中断，程序退出")
+    except Exception as e:
+        print(f"程序异常: {e}")
+        import traceback
+        traceback.print_exc()
 
 class TradingViewSignalApp:
     """TradingView信号追踪应用"""
@@ -213,21 +226,5 @@ class TradingViewSignalApp:
         # 停止事件循环
         self.event_loop.stop()
 
-def main():
-    """主函数"""
-    try:
-        # 加载配置
-        config = load_config()
-        
-        # 创建并运行应用
-        app = TradingViewSignalApp(config)
-        app.run()
-    except KeyboardInterrupt:
-        print("用户中断，程序退出")
-    except Exception as e:
-        print(f"程序异常: {e}")
-        import traceback
-        traceback.print_exc()
-        
 if __name__ == "__main__":
     main() 

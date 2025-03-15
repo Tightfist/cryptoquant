@@ -86,7 +86,7 @@ python apps/tradingview_signal_tracker/main.py
 {
   "action": "{{strategy.order.comment}}",
   "symbol": "{{ticker}}",
-  "direction": "{{strategy.order.action == 'buy' ? 'long' : 'short'}}",
+  "direction": "{{strategy.order.action}}",
   "leverage": 3,
   "position_usdt": 100,
   "timestamp": "{{time}}"

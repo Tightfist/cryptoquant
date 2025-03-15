@@ -11,22 +11,19 @@
     "webhook_path": "/webhook"
   },
   "strategy": {
-    "leverage": 3,
-    "per_position_usdt": 100,
-    "take_profit_pct": 0.05,
-    "stop_loss_pct": 0.03,
-    "trailing_stop": false,
-    "trailing_distance": 0.02,
+    "leverage": 10,
+    "per_position_usdt": 30,
+    "take_profit_pct": 0.1,
+    "stop_loss_pct": 0.025,
+    "trailing_stop": true,
+    "trailing_distance": 0.05,
     "unit_type": "quote",
     "enable_symbol_pool": true,
-    "default_symbols": ["BTC-USDT-SWAP", "ETH-USDT-SWAP"]
+    "default_symbols": ["BTC-USDT-SWAP", "ETH-USDT-SWAP","BUZZ-USDT-SWAP"]
   },
-  "notifications": {
-    "enable_telegram": false,
-    "telegram_token": "",
-    "telegram_chat_id": "",
-    "notify_on_open": true,
-    "notify_on_close": true,
-    "notify_on_error": true
+  "symbol_mapping": {
+    "BTCUSDT.P": "BTC-USDT-SWAP",
+    "ETHUSDT.P": "ETH-USDT-SWAP",
+    "BUZZUSDT.P": "BUZZ-USDT-SWAP"
   }
 } 
