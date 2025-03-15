@@ -478,7 +478,7 @@ class FundingArbitrage:
         检查是否满足平仓条件
         
         Args:
-            inst_id: 合约ID
+            inst_id: 合约ID或现货ID
             
         Returns:
             是否应该平仓
@@ -488,21 +488,32 @@ class FundingArbitrage:
         
         position = self.active_positions[inst_id]
         
-        # 计算持仓时间
-        hold_hours = (datetime.now() - position['open_time']).total_seconds() / 3600
+        # 确保使用合约ID获取资金费率
+        swap_id = inst_id
+        if "-SWAP" not in inst_id:
+            swap_id = f"{inst_id}-SWAP"
+            # 如果合约ID不存在于活跃仓位中，则无法检查
+            if swap_id not in self.active_positions:
+                self.logger.warning(f"找不到对应的合约仓位: {swap_id}")
+                return False
         
-        # 获取当前资金费率
-        current_funding_rate = self.trader.get_funding_rate(inst_id)
+        # 计算持仓时间 - 使用 timestamp 属性而不是 'open_time'
+        hold_hours = (datetime.now() - datetime.fromtimestamp(position.timestamp)).total_seconds() / 3600
         
-        # 获取开仓时的资金费率
-        open_funding_rate = position.get('funding_rate', 0)
+        # 获取当前资金费率 - 使用合约ID
+        current_funding_rate = self.trader.get_funding_rate(swap_id)
+        
+        # 获取开仓时的资金费率 - 这里需要从其他地方获取，因为 Position 类中没有这个属性
+        # 暂时使用默认值 0
+        open_funding_rate = 0
         
         # 计算未实现盈亏
-        pnl, pnl_percent = await self.calculate_unrealized_pnl(inst_id)
+        pnl, pnl_percent = await self.calculate_unrealized_pnl(swap_id)
         
         # 记录检查信息
         self.logger.info("平仓条件检查", extra={
             "inst_id": inst_id,
+            "swap_id": swap_id,
             "hold_hours": hold_hours,
             "pnl": pnl,
             "pnl_percent": pnl_percent,
@@ -690,19 +701,25 @@ class FundingArbitrage:
         if inst_id not in self.active_positions:
             return 0, 0
         
-        position = self.active_positions[inst_id]
-        swap_position = position['swap']
-        spot_position = position['spot']
+        # 获取合约和现货的仓位
+        swap_id = inst_id
+        spot_id = inst_id.replace('-SWAP', '')
+        
+        if swap_id not in self.active_positions or spot_id not in self.active_positions:
+            self.logger.warning(f"缺少配对仓位: {swap_id}/{spot_id}")
+            return 0, 0
+        
+        swap_position = self.active_positions[swap_id]
+        spot_position = self.active_positions[spot_id]
         
         # 获取当前价格
-        current_price = self.trader.get_mark_price(inst_id)
+        current_price = self.trader.get_mark_price(swap_id)
         
         # 合约盈亏 (入场价格 - 当前价格) * 数量 (因为是做空)
-        contract_size = self._get_contract_size(inst_id)
+        contract_size = self._get_contract_size(swap_id)
         swap_pnl = swap_position.quantity * (swap_position.entry_price - current_price) * contract_size
         
         # 现货盈亏 (当前价格 - 入场价格) * 数量 (因为是做多)
-        spot_id = inst_id.replace('-SWAP', '')
         spot_price = self.trader.get_spot_price(spot_id)
         spot_pnl = spot_position.quantity * (spot_price - spot_position.entry_price)
         
@@ -802,10 +819,18 @@ class FundingArbitrage:
         """定期检查平仓条件"""
         for inst_id in list(self.active_positions.keys()):
             try:
+                # 记录正在检查的仓位
+                self.logger.debug(f"检查平仓条件: {inst_id}", extra={
+                    "position_type": type(self.active_positions[inst_id]).__name__
+                })
+                
                 if await self.check_unwind_condition(inst_id):
                     await self.execute_unwind(inst_id)
             except Exception as e:
-                self.logger.error(f"检查平仓条件异常: {inst_id}", exc_info=True)
+                self.logger.error(f"检查平仓条件异常: {inst_id}", exc_info=True, extra={
+                    "error": str(e),
+                    "position_type": type(self.active_positions[inst_id]).__name__ if inst_id in self.active_positions else "Unknown"
+                })
 
 async def main_async():
     """异步主函数"""

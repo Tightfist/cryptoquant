@@ -64,41 +64,41 @@
 
 ```json
 {
+  "app_name": "funding_arbitrage",  // 应用名称，用于日志和配置文件识别
   "strategy": {
-    "min_funding_rate": 0.0001,     // 最小资金费率阈值
-    "max_basis": 0.002,             // 最大基差阈值
-    "target_profit": 0.02,          // 目标收益率 (2%)
-    "stop_loss": -0.02,             // 止损线 (-2%)
-    "max_hold_hours": 48,           // 最大持仓时间 (小时)
+    "min_funding_rate": 0.0001,     // 最小资金费率阈值，高于此值才会开仓
+    "max_basis": 0.002,             // 最大基差阈值，合约与现货价差不超过此值才会开仓
+    "target_profit": 0.02,          // 目标收益率，达到此值会触发平仓
+    "stop_loss": -0.02,             // 止损线，亏损达到此值会触发平仓
+    "max_hold_hours": 48,           // 最大持仓时间(小时)，超过此时间会触发平仓
     "leverage": 3,                  // 合约杠杆倍数
-    "allow_reverse_arbitrage": false // 是否允许反向套利
+    "allow_reverse_arbitrage": false // 是否允许反向套利(资金费率为负时)
   },
-  "instruments": [
-    "BTC-USDT-SWAP",
-    "ETH-USDT-SWAP"
-    // 其他交易对
+  "instruments": [                  // 要监控的交易对列表
+    "BTC-USDT-SWAP",                // 比特币永续合约
+    "ETH-USDT-SWAP"                 // 以太坊永续合约
   ],
-  "capital_efficiency": {
+  "capital_efficiency": {           // 资金利用率相关配置
     "enabled": false,               // 是否启用高资金利用率模式
     "usage_ratio": 0.8,             // 资金使用比例
     "spot_ratio": 0.3,              // 现货资金比例
     "swap_ratio": 0.7               // 合约资金比例
   },
-  "event_loop": {
-    "check_interval": 60,           // 检查套利机会间隔 (秒)
-    "unwind_check_interval": 300,   // 检查平仓条件间隔 (秒)
+  "event_loop": {                   // 事件循环配置
+    "check_interval": 60,           // 检查套利机会间隔(秒)
+    "unwind_check_interval": 300,   // 检查平仓条件间隔(秒)
     "max_workers": 5                // 最大工作线程数
   },
-  "exchange": {
-    "api_key": "your_api_key",
-    "secret_key": "your_secret_key",
-    "passphrase": "your_passphrase",
+  "exchange": {                     // 交易所API配置
+    "api_key": "your_api_key",      // 交易所API密钥
+    "secret_key": "your_secret_key", // 交易所密钥
+    "passphrase": "your_passphrase", // 交易所API密码
     "is_simulated": false           // 是否为模拟交易
   },
-  "logging": {
-    "level": "INFO",
-    "file": "funding_arbitrage.log",
-    "output_targets": ["file", "console"]
+  "logging": {                      // 日志配置
+    "level": "INFO",                // 日志级别
+    "file": "funding_arbitrage.log", // 日志文件名
+    "output_targets": ["file", "console"] // 日志输出目标
   }
 }
 ```
@@ -111,12 +111,12 @@
    ```
 
 2. **配置策略**：
-   - 复制 `config.example.json` 为 `config.json`
+   - 复制 `config/funding_arbitrage.example.json` 为 `config/funding_arbitrage.json`
    - 根据需要修改配置参数
 
 3. **运行策略**：
    ```bash
-   python -m okex.apps.funding_arbitrage.funding_arbitrage
+   python apps/funding_arbitrage/funding_arbitrage.py
    ```
 
 ## 注意事项

@@ -1,0 +1,24 @@
+{
+    "app_name": "price",
+    "logging": {
+      "level": "INFO",
+      "file": "price.log",
+      "output_targets": ["file"]
+    },
+    "instruments": [
+      "BTC-USDT",
+      "ETH-USDT",
+      "SOL-USDT",
+      "BNB-USDT",
+      "XRP-USDT",
+      "ADA-USDT",
+      "DOGE-USDT",
+      "AVAX-USDT",
+      "LINK-USDT",
+      "DOT-USDT"
+    ],
+    "asset_params": {
+      "ccy": "USD"
+    },
+    "refresh_interval": 30
+} 

@@ -1,7 +1,9 @@
 {
   "app_name": "tradingview_signal_tracker",
   "logging": {
-    "file": "tradingview_signal_tracker.log"
+    "level": "INFO",
+    "file": "tradingview_signal_tracker.log",
+    "output_targets": ["file"]
   },
   "server": {
     "host": "0.0.0.0",

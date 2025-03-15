@@ -1,7 +1,9 @@
 {
   "app_name": "trader_tools",
   "logging": {
-    "file": "trader_tools.log"
+    "level": "INFO",
+    "file": "trader_tools.log",
+    "output_targets": ["file", "console"]
   },
   "trading": {
     "default_leverage": 3,
@@ -26,6 +28,16 @@
     {
       "name": "AVAX-USDT-SWAP",
       "description": "雪崩永续合约",
+      "min_amount": 5
+    },
+    {
+      "name": "CRV-USDT-SWAP",
+      "description": "CRV永续合约",
+      "min_amount": 5
+    },
+    {
+      "name": "ONDO-USDT-SWAP",
+      "description": "ONDO永续合约",
       "min_amount": 5
     }
   ]

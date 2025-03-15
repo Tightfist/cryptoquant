@@ -34,7 +34,8 @@ class ExchangeAdapter(ABC):
             log_file = config['logging'].get('file')
             output_targets = config['logging'].get('output_targets')
         
-        configure_logger(app_name, log_level, log_file, output_targets)
+        # 不再在这里调用 configure_logger，因为应用程序已经配置了日志
+        # 只需获取日志记录器即可
         self.logger = logging.getLogger(self.__class__.__name__)
         
         # 初始化时打印配置摘要

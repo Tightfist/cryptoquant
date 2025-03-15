@@ -31,6 +31,13 @@ def load_config(app_name: str, config_path: Optional[str] = None) -> Dict[str, A
             # 3. 项目根目录的config目录
             os.path.join(os.getcwd(), "config", f"{app_name}.yaml"),
             os.path.join(os.getcwd(), "config", f"{app_name}.json"),
+            # 4. 示例配置文件
+            os.path.join(os.getcwd(), f"{app_name}_config.example.yaml"),
+            os.path.join(os.getcwd(), f"{app_name}_config.example.json"),
+            os.path.join(os.getcwd(), "apps", app_name, "config.example.yaml"),
+            os.path.join(os.getcwd(), "apps", app_name, "config.example.json"),
+            os.path.join(os.getcwd(), "config", f"{app_name}.example.yaml"),
+            os.path.join(os.getcwd(), "config", f"{app_name}.example.json"),
         ]
         
         # 尝试每个可能的路径
@@ -41,7 +48,7 @@ def load_config(app_name: str, config_path: Optional[str] = None) -> Dict[str, A
                 
         # 如果仍然没有找到配置文件，使用最后一个路径
         if config_path is None:
-            config_path = possible_paths[-1]  # 使用config目录作为默认位置
+            config_path = possible_paths[5]  # 使用config目录作为默认位置
     
     try:
         config = _load_file(config_path)
@@ -91,8 +98,13 @@ def get_app_config(app_name: str, config_path: Optional[str] = None) -> Dict[str
     
     # 合并配置
     if api_config:
-        # 深度合并配置
+        # 深度合并配置，但让应用配置优先（应用配置覆盖API配置）
+        # 注意：这里交换了合并顺序，先是api_config，然后是app_config
         merged_config = _deep_merge(api_config, app_config)
+        
+        # 确保app_name被正确设置
+        merged_config['app_name'] = app_name
+        
         return merged_config
     
     return app_config

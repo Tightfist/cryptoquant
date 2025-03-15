@@ -15,44 +15,50 @@
 
 1. 确保已安装所需的依赖：
    ```
-   pip install pyyaml websockets ccxt
+   pip install websockets
    ```
 
-2. 配置 `config.yaml` 文件：
-   ```yaml
-   app_name: "tradingview_signal_tracker"
-   exchange:
-     type: "okex"  # 交易所类型: okex, binance, bybit等
-     api_key: "你的API密钥"
-     secret_key: "你的密钥"
-     passphrase: "你的密码"
-     is_simulated: false
-   websocket:
-     port: 8765
-     host: "0.0.0.0"
-   strategy:
-     leverage: 3
-     per_position_usdt: 100
-     enable_symbol_pool: true
-     default_symbols: ["BTC-USDT-SWAP", "ETH-USDT-SWAP"]
-     take_profit_pct: 0.05
-     stop_loss_pct: 0.03
-     trailing_stop: true
-     trailing_distance: 0.02
-   logging:
-     level: "INFO"
-     file: "tradingview_signal_tracker.log"
-     output_targets: ["file", "console"]
-   symbol_mapping:
-     "BTCUSDT.P": "BTC-USDT-SWAP"
-     "ETHUSDT.P": "ETH-USDT-SWAP"
+2. 配置 `config/tradingview_signal_tracker.json` 文件：
+   ```json
+   {
+     "app_name": "tradingview_signal_tracker",  // 应用名称
+     "exchange": {                              // 交易所API配置
+       "type": "okex",                          // 交易所类型
+       "api_key": "你的API密钥",                 // 交易所API密钥
+       "secret_key": "你的密钥",                 // 交易所密钥
+       "passphrase": "你的密码",                 // 交易所API密码
+       "is_simulated": false                    // 是否为模拟交易
+     },
+     "websocket": {                             // WebSocket服务器配置
+       "port": 8765,                            // 监听端口
+       "host": "0.0.0.0"                        // 监听地址
+     },
+     "strategy": {                              // 策略配置
+       "leverage": 3,                           // 默认杠杆倍数
+       "per_position_usdt": 100,                // 每个仓位的USDT金额
+       "enable_symbol_pool": true,              // 是否启用交易对白名单
+       "default_symbols": ["BTC-USDT-SWAP", "ETH-USDT-SWAP"], // 允许交易的交易对列表
+       "take_profit_pct": 0.05,                 // 止盈百分比
+       "stop_loss_pct": 0.03,                   // 止损百分比
+       "trailing_stop": true,                   // 是否启用追踪止损
+       "trailing_distance": 0.02                // 追踪止损距离
+     },
+     "logging": {                               // 日志配置
+       "level": "INFO",                         // 日志级别
+       "file": "tradingview_signal_tracker.log", // 日志文件名
+       "output_targets": ["file", "console"]    // 日志输出目标
+     },
+     "symbol_mapping": {                        // 交易对名称映射
+       "BTCUSDT.P": "BTC-USDT-SWAP",            // 比特币永续合约映射
+       "ETHUSDT.P": "ETH-USDT-SWAP"             // 以太坊永续合约映射
+     }
+   }
    ```
 
 ## 运行应用
 
 ```bash
-cd okex
-python -m apps.tradingview_signal_tracker.main
+python apps/tradingview_signal_tracker/main.py
 ```
 
 ## TradingView 警报设置
@@ -159,14 +165,18 @@ python -m apps.tradingview_signal_tracker.main
 
 该应用程序设计为支持多个交易所。目前已实现 OKEx 交易所的支持，可以通过配置文件中的 `exchange.type` 字段指定交易所类型：
 
-```yaml
-exchange:
-  type: "okex"  # 交易所类型: okex, binance, bybit等
-  api_key: "你的API密钥"
-  secret_key: "你的密钥"
-  passphrase: "你的密码"
-  is_simulated: false
+```json
+{
+  "exchange": {
+    "type": "okex",
+    "api_key": "你的API密钥",
+    "secret_key": "你的密钥",
+    "passphrase": "你的密码",
+    "is_simulated": false
+  }
+}
 ```
+
 要添加新的交易所支持，需要：
 
 1. 在 `src/common/websocket/client.py` 中创建新的交易所特定的 WebSocket 客户端类
@@ -179,11 +189,13 @@ TradingView 和 OKEx 使用不同的合约命名格式。例如，TradingView �
 
 你可以在配置文件中自定义合约名称映射：
 
-```yaml
-symbol_mapping:
-  "BTCUSDT.P": "BTC-USDT-SWAP"
-  "ETHUSDT.P": "ETH-USDT-SWAP"
-  # 更多映射...
+```json
+{
+  "symbol_mapping": {
+    "BTCUSDT.P": "BTC-USDT-SWAP",
+    "ETHUSDT.P": "ETH-USDT-SWAP"
+  }
+}
 ```
 
 如果没有找到映射，应用程序会尝试使用正则表达式进行转换，例如将 `BTCUSDT.P` 转换为 `BTC-USDT-SWAP`。

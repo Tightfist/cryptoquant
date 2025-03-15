@@ -1,18 +1,20 @@
 {
   "app_name": "funding_arbitrage",
   "logging": {
-    "file": "funding_arbitrage.log"
+    "level": "INFO",
+    "file": "funding_arbitrage.log",
+    "output_targets": ["file","console"]
   },
   "strategy": {
     "leverage": 3,
-    "min_funding_rate": 0.0001,
+    "min_funding_rate": 0.0003,
     "max_basis": 0.005,
     "target_profit": 0.01,
     "stop_loss": -0.005,
-    "max_hold_hours": 24,
+    "max_hold_hours": 48,
     "allow_reverse_arbitrage": false,
     "capital_efficiency": {
-      "enabled": true,
+      "enabled": false,
       "usage_ratio": 0.8,
       "spot_ratio": 0.3,
       "swap_ratio": 0.7
@@ -24,9 +26,7 @@
     "unwind_check_interval": 300
   },
   "instruments": [
-    "BTC-USDT-SWAP",
-    "ETH-USDT-SWAP",
-    "SOL-USDT-SWAP",
-    "AVAX-USDT-SWAP"
+    "LUNA-USDT-SWAP",
+    "ETH-USDT-SWAP"
   ]
 } 

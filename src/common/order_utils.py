@@ -31,11 +31,19 @@ def calculate_order_size(
     # 检查合约类型
     is_usdt_margined = "-USDT-" in symbol  # USDT本位合约
     is_coin_margined = "-USD-" in symbol   # 币本位合约
+    is_swap = "-SWAP" in symbol            # 永续合约
     
     # 确定委托单位
     if unit_type.lower() in ['usdt', 'usd', 'quote']:
-        if is_usdt_margined:
-            # USDT本位合约按USDT计价
+        if is_usdt_margined and is_swap:
+            # USDT本位永续合约按张数下单
+            tgt_ccy = None
+            size = trader.calculate_position_size(
+                symbol, False, position_usdt * leverage
+            )
+            logger.info(f"USDT本位永续合约按张数下单: 保证金={position_usdt} USDT, 杠杆={leverage}, 张数={size}")
+        elif is_usdt_margined:
+            # 其他USDT本位合约按USDT计价
             tgt_ccy = "quote_ccy"
             size = position_usdt * leverage
             logger.info(f"USDT本位合约按USDT下单: 保证金={position_usdt} USDT, 杠杆={leverage}, 总仓位={size} USDT")
@@ -66,7 +74,13 @@ def calculate_order_size(
         logger.info(f"按合约张数下单: 保证金={position_usdt} USDT, 杠杆={leverage}, 张数={size}")
     else:
         # 默认处理
-        if is_usdt_margined:
+        if is_usdt_margined and is_swap:
+            tgt_ccy = None
+            size = trader.calculate_position_size(
+                symbol, False, position_usdt * leverage
+            )
+            logger.info(f"默认USDT本位永续合约按张数下单: 保证金={position_usdt} USDT, 杠杆={leverage}, 张数={size}")
+        elif is_usdt_margined:
             tgt_ccy = "quote_ccy"
             size = position_usdt * leverage
             logger.info(f"默认USDT本位合约按USDT下单: 保证金={position_usdt} USDT, 杠杆={leverage}, 总仓位={size} USDT")
