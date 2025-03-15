@@ -1,0 +1,30 @@
+{
+  "app_name": "tradingview_signal_tracker",
+  "logging": {
+    "file": "tradingview_signal_tracker.log"
+  },
+  "server": {
+    "host": "0.0.0.0",
+    "port": 80,
+    "webhook_path": "/webhook"
+  },
+  "strategy": {
+    "leverage": 3,
+    "per_position_usdt": 100,
+    "take_profit_pct": 0.05,
+    "stop_loss_pct": 0.03,
+    "trailing_stop": false,
+    "trailing_distance": 0.02,
+    "unit_type": "quote",
+    "enable_symbol_pool": true,
+    "default_symbols": ["BTC-USDT-SWAP", "ETH-USDT-SWAP"]
+  },
+  "notifications": {
+    "enable_telegram": false,
+    "telegram_token": "",
+    "telegram_chat_id": "",
+    "notify_on_open": true,
+    "notify_on_close": true,
+    "notify_on_error": true
+  }
+} 

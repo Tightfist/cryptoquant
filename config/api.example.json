@@ -1,0 +1,21 @@
+{
+  "okex": {
+    "api_key": "your_api_key_here",
+    "secret_key": "your_secret_key_here",
+    "passphrase": "your_passphrase_here",
+    "is_simulated": true,
+    "base_url": "https://www.okex.com",
+    "ws_url": "wss://ws.okex.com:8443/ws/v5/public",
+    "ws_private_url": "wss://ws.okex.com:8443/ws/v5/private",
+    "timeout": 10
+  },
+  "logging": {
+    "level": "INFO",
+    "output_targets": ["file", "console"],
+    "rotation": {
+      "when": "midnight",
+      "interval": 1,
+      "backup_count": 7
+    }
+  }
+} 

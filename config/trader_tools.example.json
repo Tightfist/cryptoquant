@@ -1,0 +1,32 @@
+{
+  "app_name": "trader_tools",
+  "logging": {
+    "file": "trader_tools.log"
+  },
+  "trading": {
+    "default_leverage": 3,
+    "default_price_type": "market"
+  },
+  "symbols": [
+    {
+      "name": "BTC-USDT-SWAP",
+      "description": "比特币永续合约",
+      "min_amount": 5
+    },
+    {
+      "name": "ETH-USDT-SWAP",
+      "description": "以太坊永续合约",
+      "min_amount": 5
+    },
+    {
+      "name": "SOL-USDT-SWAP",
+      "description": "索拉纳永续合约",
+      "min_amount": 5
+    },
+    {
+      "name": "AVAX-USDT-SWAP",
+      "description": "雪崩永续合约",
+      "min_amount": 5
+    }
+  ]
+} 
