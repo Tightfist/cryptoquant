@@ -94,6 +94,15 @@ class SignalProcessor:
     async def _handle_webhook(self, data: Dict[str, Any], request):
         """处理接收到的Webhook请求"""
         try:
+            # 检查是否是手动触发的API请求
+            path = request.path if hasattr(request, 'path') else ''
+            if path.endswith('/api/trigger'):
+                return await self._handle_manual_trigger(data)
+            elif path.endswith('/api/close_all'):
+                return await self._handle_manual_close_all()
+            elif path.endswith('/api/status'):
+                return await self._handle_get_status()
+                
             logger.debug(f"收到信号: {data}")
             
             # 验证信号有效性
@@ -153,39 +162,67 @@ class SignalProcessor:
                 "status": "error",
                 "message": f"Error processing signal: {str(e)}"
             }
-
-    def _validate_signal(self, signal: Dict[str, Any]) -> bool:
-        """
-        基础信号验证
-        
-        Args:
-            signal: TradingView信号
             
-        Returns:
-            bool: 信号是否有效
-        """
-        # 基本字段验证
-        required_fields = ['action']
-        if not all(field in signal for field in required_fields):
-            logger.warning(f"信号缺少必要字段: {required_fields}")
-            return False
+    async def _handle_manual_trigger(self, data: Dict[str, Any]):
+        """处理手动触发信号请求"""
+        try:
+            # 验证必要参数
+            if 'action' not in data or 'symbol' not in data:
+                return {"status": "error", "message": "Missing required parameters: action, symbol"}
+                
+            # 转换合约名称
+            original_symbol = data['symbol']
+            data['symbol'] = self._convert_symbol(original_symbol)
             
-        # 验证操作类型
-        valid_actions = ['open', 'close', 'modify', 'tp', 'sl']
-        if signal['action'] not in valid_actions:
-            logger.warning(f"无效的操作类型: {signal['action']}")
-            return False
+            # 调用策略的手动触发方法
+            from apps.tradingview_signal_tracker.strategy import TradingViewSignalStrategy
+            strategy = self.strategy_callback.__self__
+            if isinstance(strategy, TradingViewSignalStrategy):
+                result = await strategy.manual_trigger(data['action'], data['symbol'], **data)
+                return result
+            else:
+                return {"status": "error", "message": "Strategy does not support manual trigger"}
+        except Exception as e:
+            logger.exception(f"手动触发信号异常: {e}")
+            return {"status": "error", "message": f"Error triggering signal: {str(e)}"}
             
-        # 开仓信号必须包含交易对
-        if signal['action'] == 'open' and 'symbol' not in signal:
-            logger.warning("开仓信号必须包含交易对")
-            return False
+    async def _handle_manual_close_all(self):
+        """处理手动平仓所有持仓请求"""
+        try:
+            # 调用策略的手动平仓方法
+            from apps.tradingview_signal_tracker.strategy import TradingViewSignalStrategy
+            strategy = self.strategy_callback.__self__
+            if isinstance(strategy, TradingViewSignalStrategy):
+                result = await strategy.manual_close_all()
+                return result
+            else:
+                return {"status": "error", "message": "Strategy does not support manual close all"}
+        except Exception as e:
+            logger.exception(f"手动平仓异常: {e}")
+            return {"status": "error", "message": f"Error closing positions: {str(e)}"}
             
-        return True
-
+    async def _handle_get_status(self):
+        """处理获取状态请求"""
+        try:
+            # 调用策略的获取状态方法
+            from apps.tradingview_signal_tracker.strategy import TradingViewSignalStrategy
+            strategy = self.strategy_callback.__self__
+            if isinstance(strategy, TradingViewSignalStrategy):
+                result = await strategy.get_status()
+                return result
+            else:
+                return {"status": "error", "message": "Strategy does not support get status"}
+        except Exception as e:
+            logger.exception(f"获取状态异常: {e}")
+            return {"status": "error", "message": f"Error getting status: {str(e)}"}
+            
     async def start(self):
         """启动HTTP服务器"""
         logger.info("启动信号处理服务...")
+        # 注册API路由 - 修复路由注册方式
+        self.server.app.router.add_post(f"{self.path}/api/trigger", self._handle_webhook)
+        self.server.app.router.add_post(f"{self.path}/api/close_all", self._handle_webhook)
+        self.server.app.router.add_get(f"{self.path}/api/status", self._handle_webhook)
         await self.server.start()
         
     async def stop(self):

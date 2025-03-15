@@ -66,6 +66,9 @@ class TradingViewSignalStrategy:
         self.positions = self.position_mgr.load_positions()
         logger.info(f"加载已有仓位: {len(self.positions)}个")
         
+        # 初始化价格高低记录，用于追踪止损
+        self._price_high_low = {}
+        
         # 打印策略初始化信息
         logger.info("TradingView信号追踪策略初始化完成", extra={
             "杠杆": self.leverage,
@@ -140,8 +143,17 @@ class TradingViewSignalStrategy:
                 
             # 检查是否已有仓位
             if symbol in self.positions:
-                logger.info(f"已有{symbol}仓位，跳过开仓")
+                logger.warning(f"已有{symbol}仓位，跳过开仓。如需重新开仓，请先平掉现有仓位")
                 continue
+                
+            # 检查是否有未完成的订单
+            try:
+                pending_orders = self.trader.get_pending_orders(symbol)
+                if pending_orders and len(pending_orders) > 0:
+                    logger.warning(f"{symbol}有未完成的订单，跳过开仓")
+                    continue
+            except Exception as e:
+                logger.error(f"检查未完成订单失败: {e}")
             
             # 获取方向
             direction = signal.get('direction', 'long')
@@ -373,11 +385,16 @@ class TradingViewSignalStrategy:
                     else:  # 默认为多仓
                         profit_pct = (current_price - entry_price) / entry_price * 100
                     
+                    # 计算杠杆后的收益率
+                    leverage = position.leverage if hasattr(position, 'leverage') and position.leverage > 0 else 1
+                    leveraged_profit_pct = profit_pct * leverage / 100  # 转换为小数
+                    
+                    # 计算收益金额
                     profit_amount = position.quantity * abs(current_price - entry_price)
                     
                     # 打印收益信息
-                    logger.info(f"平仓收益: {symbol} 收益率={profit_pct:.2f}% 收益额={profit_amount:.2f} USDT", 
-                                extra={"profit_pct": profit_pct, "profit_amount": profit_amount})
+                    logger.info(f"平仓收益: {symbol} 收益率={profit_pct:.2f}% 杠杆后收益率={leveraged_profit_pct*100:.2f}% 收益额={profit_amount:.2f} USDT", 
+                                extra={"profit_pct": profit_pct, "leveraged_profit_pct": leveraged_profit_pct*100, "profit_amount": profit_amount})
                     
                     # 更新仓位状态
                     self.position_mgr.close_position(symbol, current_price)
@@ -477,23 +494,25 @@ class TradingViewSignalStrategy:
             if unit_type is None:
                 unit_type = self.unit_type
             
-            # 如果未指定止盈价格，则根据配置计算
+            # 如果未指定止盈价格，则根据配置计算 (使用未杠杆化的收益率)
             if tp_price is None and self.take_profit_pct > 0:
                 if direction == 'long':
                     tp_price = price * (1 + self.take_profit_pct)
                 else:
                     tp_price = price * (1 - self.take_profit_pct)
+                logger.info(f"计算止盈价格: {symbol} {direction} 当前价格={price:.4f} 止盈比例={self.take_profit_pct*100:.2f}% 止盈价格={tp_price:.4f}")
             
-            # 如果未指定止损价格，则根据配置计算
+            # 如果未指定止损价格，则根据配置计算 (使用未杠杆化的收益率)
             if sl_price is None and self.stop_loss_pct > 0:
                 if direction == 'long':
                     sl_price = price * (1 - self.stop_loss_pct)
                 else:
                     sl_price = price * (1 + self.stop_loss_pct)
+                logger.info(f"计算止损价格: {symbol} {direction} 当前价格={price:.4f} 止损比例={self.stop_loss_pct*100:.2f}% 止损价格={sl_price:.4f}")
             
             # 设置止盈止损订单
             if tp_price:
-                logger.info(f"设置止盈: {symbol} {direction} 价格={tp_price:.2f}")
+                logger.info(f"设置止盈: {symbol} {direction} 价格={tp_price:.4f}")
                 # 这里需要根据实际交易所API实现止盈订单
                 # 例如：
                 # tp_side = 'sell' if direction == 'long' else 'buy'
@@ -502,7 +521,7 @@ class TradingViewSignalStrategy:
                 #                       ord_type="limit", px=tp_price, tgt_ccy=tgt_ccy)
             
             if sl_price:
-                logger.info(f"设置止损: {symbol} {direction} 价格={sl_price:.2f}")
+                logger.info(f"设置止损: {symbol} {direction} 价格={sl_price:.4f}")
                 # 这里需要根据实际交易所API实现止损订单
                 # 例如：
                 # sl_side = 'sell' if direction == 'long' else 'buy'
@@ -546,23 +565,193 @@ class TradingViewSignalStrategy:
             
         for symbol, position in list(self.positions.items()):
             try:
-                # 获取最新价格
-                current_price = self.trader.get_mark_price(symbol)
+                # 从缓存获取最新价格，而不是每次查询
+                try:
+                    current_price = await self.market_client.cache.get_mark_price(symbol)
+                except Exception:
+                    # 如果缓存获取失败，才使用查询
+                    current_price = self.trader.get_mark_price(symbol)
+                
+                # 检查价格是否有效
+                if current_price is None or current_price <= 0:
+                    logger.warning(f"获取到的价格无效: {symbol} 价格={current_price}，跳过收益率计算")
+                    continue
                 
                 # 获取持仓方向和入场价格
                 entry_price = position.entry_price
                 
-                # 这里可以实现追踪止损逻辑
-                if self.trailing_stop:
-                    # 根据实际需求实现追踪止损
-                    pass
-                    
-                # 打印持仓监控信息
-                logger.debug(f"持仓监控: {symbol} 入场={entry_price} 当前={current_price}")
+                # 检查入场价格是否有效
+                if entry_price is None or entry_price <= 0:
+                    logger.warning(f"入场价格无效: {symbol} 价格={entry_price}，跳过收益率计算")
+                    continue
                 
+                # 确保position_type是标准化的
+                if hasattr(position, 'position_side') and position.position_side:
+                    position_type = position.position_side
+                else:
+                    position_type = position.position_type
+                
+                # 确保杠杆值是合理的
+                leverage = position.leverage
+                if leverage <= 0:
+                    logger.warning(f"杠杆值异常: {leverage}，使用默认值1")
+                    leverage = 1
+                
+                # 计算收益率 - 根据方向正确计算
+                if position_type.lower() in ['long', 'buy']:
+                    # 多仓：(当前价格 - 入场价格) / 入场价格
+                    pnl_pct = (current_price - entry_price) / entry_price
+                elif position_type.lower() in ['short', 'sell']:
+                    # 空仓：(入场价格 - 当前价格) / 入场价格
+                    pnl_pct = (entry_price - current_price) / entry_price
+                else:
+                    # 默认当作合约多仓处理
+                    logger.warning(f"未知的持仓类型: {position_type}，默认当作多仓处理")
+                    pnl_pct = (current_price - entry_price) / entry_price
+                
+                # 计算杠杆后的收益率
+                leveraged_pnl_pct = pnl_pct * leverage
+                
+                # 定期打印收益信息
+                logger.info(f"持仓监控: {symbol} 方向={position_type} 杠杆={leverage}倍 入场={entry_price:.4f} 当前={current_price:.4f} 收益率={pnl_pct*100:.2f}% 杠杆后收益率={leveraged_pnl_pct*100:.2f}%")
+                
+                # 检查止盈止损条件
+                await self._check_take_profit_stop_loss(symbol, position, current_price, pnl_pct, leveraged_pnl_pct)
+                    
             except Exception as e:
                 logger.warning(f"监控持仓异常: {e}")
                 
+    async def _check_take_profit_stop_loss(self, symbol: str, position: Position, current_price: float, pnl_pct: float, leveraged_pnl_pct: float):
+        """
+        检查止盈止损条件
+        
+        Args:
+            symbol: 交易对
+            position: 持仓信息
+            current_price: 当前价格
+            pnl_pct: 未杠杆收益率
+            leveraged_pnl_pct: 杠杆后收益率
+        """
+        # 确保收益率是合理的值
+        if abs(pnl_pct) > 1:  # 超过100%的收益率很可能是计算错误
+            logger.warning(f"收益率异常: {pnl_pct*100:.2f}%，跳过止盈止损检查")
+            return
+        
+        # 获取持仓方向
+        if hasattr(position, 'position_side') and position.position_side:
+            position_type = position.position_side
+        else:
+            position_type = position.position_type
+            
+        # 止盈条件：未杠杆收益率超过设定的止盈比例
+        if self.take_profit_pct > 0 and pnl_pct >= self.take_profit_pct:
+            logger.info(f"触发止盈: {symbol} 方向={position_type} 收益率={pnl_pct*100:.2f}% >= {self.take_profit_pct*100:.2f}% (杠杆后={leveraged_pnl_pct*100:.2f}%)")
+            await self._execute_close_position(symbol, position)
+            return
+            
+        # 止损条件：未杠杆收益率低于设定的止损比例
+        if self.stop_loss_pct > 0 and pnl_pct <= -self.stop_loss_pct:
+            logger.info(f"触发止损: {symbol} 方向={position_type} 收益率={pnl_pct*100:.2f}% <= -{self.stop_loss_pct*100:.2f}% (杠杆后={leveraged_pnl_pct*100:.2f}%)")
+            await self._execute_close_position(symbol, position)
+            return
+            
+        # 追踪止损逻辑
+        if self.trailing_stop:
+            # 更新最高价/最低价记录
+            if symbol not in self._price_high_low:
+                self._price_high_low[symbol] = {
+                    'highest': current_price if position_type.lower() in ['long', 'buy'] else float('-inf'),
+                    'lowest': current_price if position_type.lower() in ['short', 'sell'] else float('inf')
+                }
+            else:
+                if position_type.lower() in ['long', 'buy']:
+                    # 多仓更新最高价
+                    if current_price > self._price_high_low[symbol]['highest']:
+                        self._price_high_low[symbol]['highest'] = current_price
+                        logger.debug(f"更新{symbol}最高价: {current_price:.4f}")
+                else:
+                    # 空仓更新最低价
+                    if current_price < self._price_high_low[symbol]['lowest']:
+                        self._price_high_low[symbol]['lowest'] = current_price
+                        logger.debug(f"更新{symbol}最低价: {current_price:.4f}")
+            
+            # 检查是否触发追踪止损
+            if position_type.lower() in ['long', 'buy']:
+                highest = self._price_high_low[symbol]['highest']
+                # 从最高点回落超过追踪距离，触发止损
+                if highest > 0 and (highest - current_price) / highest >= self.trailing_distance:
+                    logger.info(f"触发追踪止损: {symbol} 方向={position_type} 最高={highest:.4f} 当前={current_price:.4f} 回落={(highest - current_price) / highest * 100:.2f}% >= {self.trailing_distance * 100:.2f}%")
+                    await self._execute_close_position(symbol, position)
+            else:
+                lowest = self._price_high_low[symbol]['lowest']
+                # 从最低点反弹超过追踪距离，触发止损
+                if lowest > 0 and (current_price - lowest) / lowest >= self.trailing_distance:
+                    logger.info(f"触发追踪止损: {symbol} 方向={position_type} 最低={lowest:.4f} 当前={current_price:.4f} 反弹={(current_price - lowest) / lowest * 100:.2f}% >= {self.trailing_distance * 100:.2f}%")
+                    await self._execute_close_position(symbol, position)
+                    
+    async def _execute_close_position(self, symbol: str, position: Position):
+        """
+        执行平仓操作
+        
+        Args:
+            symbol: 交易对
+            position: 持仓信息
+        """
+        try:
+            # 确定方向
+            if hasattr(position, 'position_side') and position.position_side:
+                position_type = position.position_side
+            else:
+                position_type = position.position_type
+                
+            # 根据持仓方向确定平仓参数
+            if position_type.lower() in ['long', 'buy']:
+                pos_side = 'long'
+                side = 'sell'  # 平多仓需要卖出
+            elif position_type.lower() in ['short', 'sell']:
+                pos_side = 'short'
+                side = 'buy'   # 平空仓需要买入
+            else:
+                # 默认当作多仓处理
+                logger.warning(f"未知的持仓类型: {position_type}，默认当作多仓处理")
+                pos_side = 'long'
+                side = 'sell'
+                
+            # 使用原始仓位大小
+            size = position.quantity
+            
+            # 执行平仓
+            order_result = self.trader.swap_order(
+                symbol, side, pos_side, size, ord_type="market"
+            )
+            
+            # 检查订单是否成功
+            if (order_result and 
+                order_result.get('code') == '0' and
+                order_result.get('data') and 
+                len(order_result['data']) > 0 and
+                order_result['data'][0].get('sCode') == '0'):
+                
+                order_id = order_result['data'][0]['ordId']
+                logger.info(f"自动平仓成功: {symbol} 方向={position_type} 数量={size}", 
+                            extra={"order_id": order_id})
+                
+                # 更新仓位状态
+                position.closed = True
+                self.position_mgr.update_position(position)
+                
+                # 从当前持仓中移除
+                if symbol in self.positions:
+                    del self.positions[symbol]
+                    
+                # 清除价格记录
+                if symbol in self._price_high_low:
+                    del self._price_high_low[symbol]
+            else:
+                logger.error(f"自动平仓失败: {symbol}", extra={"result": order_result})
+        except Exception as e:
+            logger.exception(f"执行平仓异常: {e}")
+    
     def get_position_summary(self) -> Dict[str, Any]:
         """获取持仓摘要信息"""
         summary = {
@@ -575,17 +764,59 @@ class TradingViewSignalStrategy:
                 # 获取最新价格
                 current_price = self.trader.get_mark_price(symbol)
                 
-                # 计算盈亏
+                # 检查价格是否有效
+                if current_price is None or current_price <= 0:
+                    logger.warning(f"获取到的价格无效: {symbol} 价格={current_price}，跳过收益率计算")
+                    summary["positions"][symbol] = {
+                        "entry_price": position.entry_price,
+                        "current_price": "无效价格",
+                        "quantity": position.quantity,
+                        "pnl_percent": "无法计算",
+                        "position_type": position.position_type,
+                        "leverage": position.leverage,
+                        "timestamp": position.timestamp
+                    }
+                    continue
+                
+                # 获取入场价格
                 entry_price = position.entry_price
-                pnl_pct = (current_price - entry_price) / entry_price
-                if position.position_type == "short":
-                    pnl_pct = -pnl_pct
+                
+                # 检查入场价格是否有效
+                if entry_price is None or entry_price <= 0:
+                    logger.warning(f"入场价格无效: {symbol} 价格={entry_price}，跳过收益率计算")
+                    summary["positions"][symbol] = {
+                        "entry_price": "无效价格",
+                        "current_price": current_price,
+                        "quantity": position.quantity,
+                        "pnl_percent": "无法计算",
+                        "position_type": position.position_type,
+                        "leverage": position.leverage,
+                        "timestamp": position.timestamp
+                    }
+                    continue
+                
+                # 计算盈亏
+                if position.position_type.lower() in ['long', 'buy']:
+                    # 多仓：(当前价格 - 入场价格) / 入场价格
+                    pnl_pct = (current_price - entry_price) / entry_price
+                elif position.position_type.lower() in ['short', 'sell']:
+                    # 空仓：(入场价格 - 当前价格) / 入场价格
+                    pnl_pct = (entry_price - current_price) / entry_price
+                else:
+                    # 默认当作合约多仓处理
+                    logger.warning(f"未知的持仓类型: {position.position_type}，默认当作多仓处理")
+                    pnl_pct = (current_price - entry_price) / entry_price
+                
+                # 计算杠杆后的收益率
+                leverage = position.leverage if hasattr(position, 'leverage') and position.leverage > 0 else 1
+                leveraged_pnl_pct = pnl_pct * leverage
                 
                 summary["positions"][symbol] = {
                     "entry_price": entry_price,
                     "current_price": current_price,
                     "quantity": position.quantity,
                     "pnl_percent": f"{pnl_pct*100:.2f}%",
+                    "leveraged_pnl_percent": f"{leveraged_pnl_pct*100:.2f}%",
                     "position_type": position.position_type,
                     "leverage": position.leverage,
                     "timestamp": position.timestamp
@@ -597,3 +828,93 @@ class TradingViewSignalStrategy:
                 }
                 
         return summary 
+    
+    async def manual_trigger(self, action: str, symbol: str, **kwargs):
+        """
+        手动触发信号
+        
+        Args:
+            action: 操作类型 (open/close/tp/sl/modify)
+            symbol: 交易对
+            **kwargs: 其他参数
+        
+        Returns:
+            Dict: 操作结果
+        """
+        try:
+            # 构建信号
+            signal = {
+                'action': action,
+                'symbol': symbol,
+                **kwargs
+            }
+            
+            # 获取当前价格
+            if 'current_price' not in signal:
+                try:
+                    signal['current_price'] = await self.market_client.cache.get_mark_price(symbol)
+                except Exception:
+                    signal['current_price'] = self.trader.get_mark_price(symbol)
+            
+            logger.info(f"手动触发信号: {action} {symbol}", extra={"signal": signal})
+            
+            # 处理信号
+            await self.handle_signal(signal)
+            
+            return {"status": "success", "message": f"手动触发信号成功: {action} {symbol}"}
+        except Exception as e:
+            logger.exception(f"手动触发信号异常: {e}")
+            return {"status": "error", "message": f"手动触发信号失败: {str(e)}"}
+    
+    async def manual_close_all(self):
+        """
+        手动平掉所有仓位
+        
+        Returns:
+            Dict: 操作结果
+        """
+        try:
+            if not self.positions:
+                return {"status": "success", "message": "没有需要平仓的持仓"}
+                
+            results = {}
+            for symbol in list(self.positions.keys()):
+                try:
+                    result = await self.manual_trigger('close', symbol)
+                    results[symbol] = result
+                except Exception as e:
+                    results[symbol] = {"status": "error", "message": str(e)}
+            
+            return {"status": "success", "results": results}
+        except Exception as e:
+            logger.exception(f"手动平仓异常: {e}")
+            return {"status": "error", "message": f"手动平仓失败: {str(e)}"}
+    
+    async def get_status(self):
+        """
+        获取当前状态
+        
+        Returns:
+            Dict: 状态信息
+        """
+        try:
+            position_summary = self.get_position_summary()
+            
+            return {
+                "status": "success",
+                "positions": position_summary,
+                "allowed_symbols": list(self.allowed_symbols) if self.enable_symbol_pool else "all",
+                "config": {
+                    "leverage": self.leverage,
+                    "per_position_usdt": self.per_position_usdt,
+                    "take_profit_pct": self.take_profit_pct,
+                    "stop_loss_pct": self.stop_loss_pct,
+                    "trailing_stop": self.trailing_stop,
+                    "trailing_distance": self.trailing_distance,
+                    "unit_type": self.unit_type,
+                    "enable_symbol_pool": self.enable_symbol_pool
+                }
+            }
+        except Exception as e:
+            logger.exception(f"获取状态异常: {e}")
+            return {"status": "error", "message": f"获取状态失败: {str(e)}"} 

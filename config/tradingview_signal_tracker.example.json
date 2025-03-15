@@ -1,14 +1,14 @@
 {
   "app_name": "tradingview_signal_tracker",
   "logging": {
-    "level": "INFO",
+    "level": "DEBUG",
     "file": "tradingview_signal_tracker.log",
-    "output_targets": ["file"]
+    "output_targets": ["file", "console"]
   },
-  "server": {
+  "webhook": {
     "host": "0.0.0.0",
     "port": 80,
-    "webhook_path": "/webhook"
+    "path": "/webhook"
   },
   "strategy": {
     "leverage": 10,
@@ -19,11 +19,11 @@
     "trailing_distance": 0.05,
     "unit_type": "quote",
     "enable_symbol_pool": true,
-    "default_symbols": ["BTC-USDT-SWAP", "ETH-USDT-SWAP","BUZZ-USDT-SWAP"]
+    "default_symbols": ["BTC-USDT-SWAP", "ETH-USDT-SWAP","SWARMS-USDT-SWAP"]
   },
   "symbol_mapping": {
     "BTCUSDT.P": "BTC-USDT-SWAP",
     "ETHUSDT.P": "ETH-USDT-SWAP",
-    "BUZZUSDT.P": "BUZZ-USDT-SWAP"
+    "SWARMSUSDT.P": "SWARMS-USDT-SWAP"
   }
 } 
