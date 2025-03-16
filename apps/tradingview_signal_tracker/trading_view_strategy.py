@@ -58,7 +58,7 @@ class TradingViewStrategy(BaseStrategy):
         将TradingView的合约名称转换为OKEx的格式
         
         Args:
-            symbol: TradingView的合约名称，如 BTCUSDT.P, SWARMSUSDT.P
+            symbol: TradingView的合约名称，如 BTCUSDT.P, BTCUSDT, SWARMSUSDT.P
             
         Returns:
             str: OKEx的合约名称，如 BTC-USDT-SWAP, SWARMS-USDT-SWAP
@@ -66,6 +66,15 @@ class TradingViewStrategy(BaseStrategy):
         # 如果在映射表中，直接返回映射结果
         if symbol in self.symbol_mapping:
             return self.symbol_mapping[symbol]
+            
+        # 尝试处理不带后缀的格式，如 BTCUSDT
+        if "USDT" in symbol and "-" not in symbol and "." not in symbol:
+            # 找到USDT的位置
+            usdt_pos = symbol.find("USDT")
+            if usdt_pos > 0:
+                # 分离币种名称
+                coin = symbol[:usdt_pos]
+                return f"{coin}-USDT-SWAP"
             
         # 尝试使用正则表达式进行转换
         # 例如：将 BTCUSDT.P 或 SWARMSUSDT.P 转换为 BTC-USDT-SWAP 或 SWARMS-USDT-SWAP
@@ -101,30 +110,48 @@ class TradingViewStrategy(BaseStrategy):
             
             # 验证信号数据
             if not self._validate_tv_signal(signal_data):
+                self.logger.error(f"信号数据不完整或格式错误: {signal_data}")
                 return False, "信号数据不完整或格式错误"
             
             # 解析信号类型
-            signal_type = signal_data.get('strategy', {}).get('action', '').lower()
+            signal_type = signal_data.get('action', '').lower()
+            if not signal_type and 'strategy' in signal_data:
+                signal_type = signal_data.get('strategy', {}).get('action', '').lower()
+            
+            self.logger.info(f"解析到信号类型: {signal_type}")
             
             # 转换为标准化交易信号
-            if signal_type in ['buy', 'long']:
-                trade_signal = self._parse_open_signal(signal_data, "long")
+            trade_signal = None
+            if signal_type in ['buy', 'long', 'open']:
+                # 确定方向（默认为long）
+                direction = signal_data.get('direction', 'long').lower()
+                if signal_type == 'buy' or (signal_type == 'open' and direction != 'short'):
+                    direction = 'long'
+                self.logger.info(f"处理开仓信号，方向: {direction}")
+                trade_signal = self._parse_open_signal(signal_data, direction)
             elif signal_type in ['sell', 'short']:
+                self.logger.info(f"处理空头开仓信号")
                 trade_signal = self._parse_open_signal(signal_data, "short")
             elif signal_type in ['close', 'exit', 'close_all']:
+                self.logger.info(f"处理平仓信号")
                 trade_signal = self._parse_close_signal(signal_data)
             elif signal_type in ['modify', 'update']:
+                self.logger.info(f"处理修改信号")
                 trade_signal = self._parse_modify_signal(signal_data)
             elif signal_type in ['status', 'query']:
+                self.logger.info(f"处理状态查询信号")
                 status = await self.get_status()
                 return True, json.dumps(status)
             else:
+                self.logger.error(f"未知信号类型: {signal_type}")
                 return False, f"未知信号类型: {signal_type}"
             
             # 处理交易信号
             if trade_signal:
+                self.logger.info(f"生成交易信号: {vars(trade_signal)}")
                 return await self.handle_trade_signal(trade_signal)
             else:
+                self.logger.error(f"无法解析交易信号，原始数据: {signal_data}")
                 return False, "无法解析交易信号"
                 
         except Exception as e:
@@ -206,6 +233,9 @@ class TradingViewStrategy(BaseStrategy):
             entry_price = strategy.get('price', signal_data.get('price'))
             quantity = strategy.get('contracts', signal_data.get('contracts'))
             
+            # 获取仓位大小（USDT金额）
+            position_usdt = strategy.get('position_usdt', signal_data.get('position_usdt'))
+            
             # 获取止盈止损参数
             # 允许使用不同的字段名
             tp_price = strategy.get('tp_price', signal_data.get('tp_price'))
@@ -254,7 +284,8 @@ class TradingViewStrategy(BaseStrategy):
                     "raw_signal": signal_data,
                     "tv_symbol": symbol,
                     "tp_price": tp_price,
-                    "sl_price": sl_price
+                    "sl_price": sl_price,
+                    "position_usdt": position_usdt
                 }
             )
             
@@ -402,4 +433,86 @@ class TradingViewStrategy(BaseStrategy):
             return await self.manual_close_all()
             
         # 调用父类的处理方法
-        return await super().handle_trade_signal(signal) 
+        return await super().handle_trade_signal(signal)
+    
+    def _get_position_usdt(self, signal: Optional[Any] = None) -> float:
+        """
+        获取开仓仓位大小（USDT金额）
+        
+        Args:
+            signal: 信号对象，可选，包含仓位信息
+            
+        Returns:
+            float: 仓位大小，单位USDT
+        """
+        # 首先检查信号中是否包含仓位大小
+        if signal and hasattr(signal, 'extra_data') and signal.extra_data:
+            # 检查raw_signal中是否包含position_usdt字段
+            raw_signal = signal.extra_data.get('raw_signal', {})
+            if isinstance(raw_signal, dict):
+                position_usdt = raw_signal.get('position_usdt')
+                if position_usdt:
+                    try:
+                        return float(position_usdt)
+                    except (ValueError, TypeError):
+                        self.logger.warning(f"无法转换position_usdt为浮点数: {position_usdt}")
+        
+        # 如果信号中没有指定，则使用配置中的默认值
+        return float(self.config.get('strategy', {}).get('per_position_usdt', 100))
+    
+    def _get_leverage(self, signal: Optional[Any] = None) -> int:
+        """
+        获取杠杆倍数
+        
+        Args:
+            signal: 信号对象，可选，包含杠杆信息
+            
+        Returns:
+            int: 杠杆倍数
+        """
+        # 首先检查信号中是否包含杠杆倍数
+        if signal and hasattr(signal, 'leverage') and signal.leverage:
+            return signal.leverage
+        
+        # 如果信号中没有指定，则使用配置中的默认值
+        return int(self.config.get('strategy', {}).get('leverage', 3))
+    
+    def _get_unit_type(self, signal: Optional[Any] = None) -> str:
+        """
+        获取委托单位类型 (quote/base/contract)
+        
+        Args:
+            signal: 信号对象，可选，包含单位类型信息
+            
+        Returns:
+            str: 单位类型
+        """
+        # 首先检查信号中是否包含单位类型
+        if signal and hasattr(signal, 'unit_type') and signal.unit_type:
+            return signal.unit_type
+        
+        # 如果信号中没有指定，则使用配置中的默认值
+        return self.config.get('strategy', {}).get('unit_type', 'quote')
+        
+    async def _get_entry_price(self, signal: Optional[Any] = None) -> float:
+        """
+        获取入场价格
+        
+        Args:
+            signal: 信号对象，可选，包含入场价格信息
+            
+        Returns:
+            float: 入场价格
+        """
+        # 首先检查信号中是否包含入场价格
+        if signal and hasattr(signal, 'entry_price') and signal.entry_price:
+            return signal.entry_price
+        
+        # 如果没有指定价格，获取当前市场价格
+        if signal and hasattr(signal, 'symbol') and signal.symbol:
+            mark_price = await self.data_cache.get_mark_price(signal.symbol)
+            if mark_price:
+                return mark_price
+                
+        # 如果无法获取价格，返回None
+        return None 

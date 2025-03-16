@@ -18,8 +18,8 @@
     "trailing_stop": true,
     "trailing_distance": 0.05,
     "unit_type": "quote",
-    "enable_symbol_pool": true,
-    "default_symbols": ["BTC-USDT-SWAP", "ETH-USDT-SWAP","SWARMS-USDT-SWAP"]
+    "enable_symbol_pool": false,
+    "default_symbols": ["BTC-USDT-SWAP"]
   },
   "symbol_mapping": {
     "BTCUSDT.P": "BTC-USDT-SWAP",

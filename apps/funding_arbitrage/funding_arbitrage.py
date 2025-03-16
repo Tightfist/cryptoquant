@@ -66,6 +66,11 @@ class FundingArbitrage:
         Returns:
             是否存在套利机会
         """
+        # 确保使用正确的合约ID格式
+        if "-SWAP" not in inst_id:
+            self.logger.warning(f"传入的标的应该包含-SWAP后缀: {inst_id}，已自动添加")
+            inst_id = f"{inst_id}-SWAP"
+            
         # 如果已有持仓，跳过
         if inst_id in self.active_positions:
             return False
@@ -500,7 +505,7 @@ class FundingArbitrage:
         # 计算持仓时间 - 使用 timestamp 属性而不是 'open_time'
         hold_hours = (datetime.now() - datetime.fromtimestamp(position.timestamp)).total_seconds() / 3600
         
-        # 获取当前资金费率 - 使用合约ID
+        # 获取当前资金费率 - 使用合约ID (确保带有-SWAP后缀)
         current_funding_rate = self.trader.get_funding_rate(swap_id)
         
         # 获取开仓时的资金费率 - 这里需要从其他地方获取，因为 Position 类中没有这个属性
@@ -571,6 +576,11 @@ class FundingArbitrage:
         Args:
             inst_id: 合约ID
         """
+        # 确保使用正确的合约ID格式
+        if "-SWAP" not in inst_id:
+            self.logger.warning(f"传入的标的应该包含-SWAP后缀: {inst_id}，已自动添加")
+            inst_id = f"{inst_id}-SWAP"
+            
         if inst_id not in self.active_positions:
             self.logger.warning(f"尝试平仓不存在的持仓: {inst_id}")
             return
@@ -701,16 +711,18 @@ class FundingArbitrage:
         if inst_id not in self.active_positions:
             return 0, 0
         
-        # 获取合约和现货的仓位
+        # 确保使用正确的合约ID和现货ID格式
         swap_id = inst_id
         spot_id = inst_id.replace('-SWAP', '')
         
-        if swap_id not in self.active_positions or spot_id not in self.active_positions:
-            self.logger.warning(f"缺少配对仓位: {swap_id}/{spot_id}")
+        # 获取字典中的position对象
+        position_data = self.active_positions[inst_id]
+        if not isinstance(position_data, dict) or 'swap' not in position_data or 'spot' not in position_data:
+            self.logger.warning(f"仓位数据格式不正确: {inst_id}")
             return 0, 0
-        
-        swap_position = self.active_positions[swap_id]
-        spot_position = self.active_positions[spot_id]
+            
+        swap_position = position_data['swap']
+        spot_position = position_data['spot']
         
         # 获取当前价格
         current_price = self.trader.get_mark_price(swap_id)
@@ -810,6 +822,11 @@ class FundingArbitrage:
         """定期检查套利机会"""
         for inst_id in self.config.get('instruments', []):
             try:
+                # 确保使用正确的合约ID格式
+                if "-SWAP" not in inst_id:
+                    self.logger.warning(f"配置的标的应该包含-SWAP后缀: {inst_id}，已自动添加")
+                    inst_id = f"{inst_id}-SWAP"
+                    
                 if await self.check_opportunity(inst_id):
                     await self.execute_arbitrage(inst_id)
             except Exception as e:
@@ -823,6 +840,10 @@ class FundingArbitrage:
                 self.logger.debug(f"检查平仓条件: {inst_id}", extra={
                     "position_type": type(self.active_positions[inst_id]).__name__
                 })
+                
+                # 确保inst_id包含-SWAP后缀
+                if "-SWAP" not in inst_id:
+                    self.logger.warning(f"仓位ID应该包含-SWAP后缀: {inst_id}，可能会导致问题")
                 
                 if await self.check_unwind_condition(inst_id):
                     await self.execute_unwind(inst_id)
