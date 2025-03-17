@@ -137,6 +137,78 @@ class TradingFrameworkApiHandler:
                 status=500
             )
     
+    async def handle_api_daily_pnl(self, request: web.Request) -> web.Response:
+        """
+        处理每日收益查询API请求
+        
+        Args:
+            request: HTTP请求对象
+            
+        Returns:
+            web.Response: HTTP响应
+        """
+        try:
+            # 获取查询参数
+            params = request.query
+            start_date = params.get('start_date')
+            end_date = params.get('end_date')
+            
+            # 获取每日收益数据
+            daily_pnl = await self.framework.get_daily_pnl(start_date, end_date)
+            
+            # 返回结果
+            return web.json_response({
+                "success": True,
+                "data": daily_pnl
+            })
+        except Exception as e:
+            self.logger.exception(f"处理每日收益查询API异常: {e}")
+            return web.json_response(
+                {"success": False, "message": f"处理异常: {e}"},
+                status=500
+            )
+    
+    async def handle_api_position_history(self, request: web.Request) -> web.Response:
+        """
+        处理仓位历史查询API请求
+        
+        Args:
+            request: HTTP请求对象
+            
+        Returns:
+            web.Response: HTTP响应
+        """
+        try:
+            # 获取查询参数
+            params = request.query
+            start_date = params.get('start_date')
+            end_date = params.get('end_date')
+            symbol = params.get('symbol')
+            limit_str = params.get('limit', '100')
+            
+            # 转换limit为整数
+            try:
+                limit = int(limit_str)
+            except ValueError:
+                limit = 100
+            
+            # 获取仓位历史数据
+            position_history = await self.framework.get_position_history(
+                start_date, end_date, symbol, limit
+            )
+            
+            # 返回结果
+            return web.json_response({
+                "success": True,
+                "data": position_history
+            })
+        except Exception as e:
+            self.logger.exception(f"处理仓位历史查询API异常: {e}")
+            return web.json_response(
+                {"success": False, "message": f"处理异常: {e}"},
+                status=500
+            )
+    
     def register_routes(self, app: web.Application, base_path: str = ""):
         """
         向web应用注册API路由
@@ -153,12 +225,16 @@ class TradingFrameworkApiHandler:
         trigger_path = f"{base_path}/api/trigger" if base_path else "/api/trigger"
         close_all_path = f"{base_path}/api/close_all" if base_path else "/api/close_all"
         status_path = f"{base_path}/api/status" if base_path else "/api/status"
+        daily_pnl_path = f"{base_path}/api/daily_pnl" if base_path else "/api/daily_pnl"
+        position_history_path = f"{base_path}/api/position_history" if base_path else "/api/position_history"
         
         # 注册路由
         app.router.add_post(trigger_path, self.handle_api_trigger)
         app.router.add_post(close_all_path, self.handle_api_close_all)
         app.router.add_get(status_path, self.handle_api_status)
+        app.router.add_get(daily_pnl_path, self.handle_api_daily_pnl)
+        app.router.add_get(position_history_path, self.handle_api_position_history)
         
-        self.logger.info(f"已注册交易框架API路由: {trigger_path}, {close_all_path}, {status_path}")
+        self.logger.info(f"已注册交易框架API路由: {trigger_path}, {close_all_path}, {status_path}, {daily_pnl_path}, {position_history_path}")
         
-        return [trigger_path, close_all_path, status_path] 
+        return [trigger_path, close_all_path, status_path, daily_pnl_path, position_history_path] 

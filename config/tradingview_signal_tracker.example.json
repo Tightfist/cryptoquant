@@ -11,12 +11,12 @@
     "path": "/webhook"
   },
   "strategy": {
-    "leverage": 10,
+    "leverage": 18,
     "per_position_usdt": 30,
-    "take_profit_pct": 0.1,
-    "stop_loss_pct": 0.025,
+    "take_profit_pct": 0.055,
+    "stop_loss_pct": 0.0185,
     "trailing_stop": true,
-    "trailing_distance": 0.05,
+    "trailing_distance": 0.0185,
     "unit_type": "quote",
     "enable_symbol_pool": false,
     "default_symbols": ["BTC-USDT-SWAP"]

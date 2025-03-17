@@ -540,6 +540,14 @@ class BaseStrategy(ABC):
             # 检查每个持仓的止盈止损
             for symbol, position in list(self.positions.items()):
                 try:
+                    # 确保已订阅该交易对的行情数据
+                    if self.market_subscriber and hasattr(self.market_subscriber, 'subscribed_symbols'):
+                        if symbol not in self.market_subscriber.subscribed_symbols:
+                            self.logger.info(f"检测到未订阅的交易对 {symbol}，正在订阅行情...")
+                            self._subscribe_market_data(symbol)
+                            # 给一点时间让订阅生效
+                            await asyncio.sleep(1)
+                    
                     # 获取当前价格
                     try:
                         # 尝试使用OKExDataCache的get_mark_price方法
@@ -564,18 +572,18 @@ class BaseStrategy(ABC):
                     # 计算带杠杆的盈亏百分比
                     leveraged_pnl_pct = pnl_pct * position.leverage
                     
-                    # 计算盈亏金额
-                    notional_value = abs(position.quantity) * position.entry_price
-                    # 原始盈亏金额（未考虑杠杆）
-                    raw_pnl_amount = notional_value * pnl_pct
-                    # 实际盈亏金额（考虑杠杆）
-                    pnl_amount = raw_pnl_amount * position.leverage
-                    
-                    # 计算保证金
+                    # 计算盈亏金额 - 修正计算方法
                     # 合约价值 = 数量 * 入场价格
                     contract_value = abs(position.quantity) * position.entry_price
-                    # 保证金 = 合约价值/杠杆倍数
+                    
+                    # 保证金 = 合约价值 / 杠杆倍数
                     margin = contract_value / position.leverage
+                    
+                    # 原始盈亏金额（未考虑杠杆）
+                    raw_pnl_amount = abs(position.quantity) * (mark_price - position.entry_price) if direction == "long" else abs(position.quantity) * (position.entry_price - mark_price)
+                    
+                    # 实际盈亏金额（考虑杠杆）- 实际上是保证金 * 杠杆后的收益率
+                    pnl_amount = margin * leveraged_pnl_pct
                     
                     # 计算持仓时间
                     current_timestamp = int(time.time() * 1000)
@@ -844,8 +852,32 @@ class BaseStrategy(ABC):
                 self.logger.error(f"平仓失败: {close_result}")
                 return
             
-            # 更新仓位状态
-            self.position_mgr.close_position(symbol, mark_price if mark_price else 0)
+            # 计算收益信息
+            direction = "long" if position.quantity > 0 else "short"
+            if direction == "long":
+                pnl_pct = (mark_price - position.entry_price) / position.entry_price
+            else:  # short
+                pnl_pct = (position.entry_price - mark_price) / position.entry_price
+                
+            # 计算带杠杆的盈亏百分比
+            leveraged_pnl_pct = pnl_pct * position.leverage
+            
+            # 计算合约价值和保证金
+            contract_value = abs(position.quantity) * position.entry_price
+            margin = contract_value / position.leverage
+            
+            # 计算实际盈亏金额
+            pnl_amount = margin * leveraged_pnl_pct
+            
+            # 更新仓位状态 - 不删除记录，而是标记为已关闭并记录收益信息
+            current_timestamp = int(time.time() * 1000)
+            self.position_mgr.close_position(
+                symbol, 
+                mark_price if mark_price else 0,
+                current_timestamp,
+                pnl_amount,
+                pnl_pct
+            )
             
             # 从内存中删除仓位
             if symbol in self.positions:
@@ -855,10 +887,20 @@ class BaseStrategy(ABC):
             if symbol in self._price_high_low:
                 del self._price_high_low[symbol]
             
+            # 记录详细的平仓信息
             self.logger.info(f"自动平仓成功 {symbol} @ {mark_price}", extra={
                 "symbol": symbol,
+                "direction": direction,
+                "entry_price": position.entry_price,
                 "exit_price": mark_price,
-                "pnl": (mark_price - position.entry_price) * position.quantity if mark_price else "未知"
+                "quantity": abs(position.quantity),
+                "leverage": position.leverage,
+                "pnl_pct": pnl_pct * 100,
+                "leveraged_pnl_pct": leveraged_pnl_pct * 100,
+                "pnl_amount": pnl_amount,
+                "margin": margin,
+                "entry_time": position.timestamp,
+                "exit_time": current_timestamp
             })
         except Exception as e:
             self.logger.exception(f"执行平仓异常 {symbol}: {e}")
@@ -953,6 +995,35 @@ class BaseStrategy(ABC):
         
         # 子类可以在重写此方法中添加额外信息
         return status
+        
+    def get_daily_pnl(self, start_date: str = None, end_date: str = None) -> List[Dict]:
+        """
+        获取每日收益统计
+        
+        Args:
+            start_date: 开始日期，格式为 YYYY-MM-DD，默认为7天前
+            end_date: 结束日期，格式为 YYYY-MM-DD，默认为今天
+            
+        Returns:
+            List[Dict]: 每日收益统计列表
+        """
+        return self.position_mgr.get_daily_pnl(start_date, end_date)
+    
+    def get_position_history(self, start_date: str = None, end_date: str = None, 
+                              symbol: str = None, limit: int = 100) -> List[Dict]:
+        """
+        获取历史仓位记录
+        
+        Args:
+            start_date: 开始日期，格式为 YYYY-MM-DD，默认为30天前
+            end_date: 结束日期，格式为 YYYY-MM-DD，默认为今天
+            symbol: 交易对，默认为所有
+            limit: 最大返回记录数，默认100条
+            
+        Returns:
+            List[Dict]: 历史仓位记录列表
+        """
+        return self.position_mgr.get_position_history(start_date, end_date, symbol, limit)
 
 
 class TradingFramework:
@@ -1077,10 +1148,34 @@ class TradingFramework:
         return await self.strategy.manual_close_all()
     
     async def get_status(self) -> Dict[str, Any]:
-        """
-        获取框架状态信息
+        """获取框架状态信息"""
+        return await self.strategy.get_status()
         
-        Returns:
-            Dict[str, Any]: 状态信息
+    async def get_daily_pnl(self, start_date: str = None, end_date: str = None) -> List[Dict]:
         """
-        return await self.strategy.get_status() 
+        获取每日收益统计
+        
+        Args:
+            start_date: 开始日期，格式为 YYYY-MM-DD，默认为7天前
+            end_date: 结束日期，格式为 YYYY-MM-DD，默认为今天
+            
+        Returns:
+            List[Dict]: 每日收益统计列表
+        """
+        return self.strategy.get_daily_pnl(start_date, end_date)
+    
+    async def get_position_history(self, start_date: str = None, end_date: str = None, 
+                                  symbol: str = None, limit: int = 100) -> List[Dict]:
+        """
+        获取历史仓位记录
+        
+        Args:
+            start_date: 开始日期，格式为 YYYY-MM-DD，默认为30天前
+            end_date: 结束日期，格式为 YYYY-MM-DD，默认为今天
+            symbol: 交易对，默认为所有
+            limit: 最大返回记录数，默认100条
+            
+        Returns:
+            List[Dict]: 历史仓位记录列表
+        """
+        return self.strategy.get_position_history(start_date, end_date, symbol, limit) 

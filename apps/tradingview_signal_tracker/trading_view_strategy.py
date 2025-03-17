@@ -496,7 +496,7 @@ class TradingViewStrategy(BaseStrategy):
         
     async def _get_entry_price(self, signal: Optional[Any] = None) -> float:
         """
-        获取入场价格
+        获取入场价格，优先从缓存获取，如果缓存不可用则直接从API获取
         
         Args:
             signal: 信号对象，可选，包含入场价格信息
@@ -506,13 +506,30 @@ class TradingViewStrategy(BaseStrategy):
         """
         # 首先检查信号中是否包含入场价格
         if signal and hasattr(signal, 'entry_price') and signal.entry_price:
+            self.logger.info(f"使用信号中指定的入场价格: {signal.entry_price}")
             return signal.entry_price
         
         # 如果没有指定价格，获取当前市场价格
         if signal and hasattr(signal, 'symbol') and signal.symbol:
+            # 先尝试从缓存获取
             mark_price = await self.data_cache.get_mark_price(signal.symbol)
-            if mark_price:
+            if mark_price and mark_price > 0:
+                self.logger.info(f"使用缓存获取的市场价格: {mark_price}")
                 return mark_price
                 
+            # 缓存不可用，直接使用API获取
+            self.logger.info(f"缓存中无法获取 {signal.symbol} 价格，尝试直接从API获取")
+            try:
+                # 直接调用trader的方法获取价格
+                api_price = self.trader.get_mark_price(signal.symbol)
+                if api_price and api_price > 0:
+                    self.logger.info(f"成功从API获取价格: {signal.symbol} = {api_price}")
+                    return api_price
+                else:
+                    self.logger.warning(f"API返回的价格无效: {api_price}")
+            except Exception as e:
+                self.logger.exception(f"从API获取 {signal.symbol} 价格异常: {e}")
+                
         # 如果无法获取价格，返回None
+        self.logger.warning(f"无法获取价格，symbol={signal.symbol if signal and hasattr(signal, 'symbol') else None}")
         return None 
