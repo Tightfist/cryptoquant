@@ -14,6 +14,7 @@ import time
 from abc import ABC, abstractmethod
 from typing import Dict, Any, List, Optional, Set, Tuple, Callable
 from dataclasses import dataclass
+from enum import Enum, auto
 
 from src.common.position_manager import PositionManager, Position
 from src.common.data_cache import OKExDataCache
@@ -22,6 +23,20 @@ from src.common.order_utils import calculate_order_size
 
 # 导入市场数据订阅器
 from src.common.market_subscriber import OKExMarketSubscriber
+
+
+class StrategyStatus(str, Enum):
+    """策略状态枚举"""
+    IDLE = "IDLE"  # 空闲状态
+    HANDLING_SIGNAL = "HANDLING_SIGNAL"  # 处理信号中
+    OPENING_POSITION = "OPENING_POSITION"  # 开仓中
+    CLOSING_POSITION = "CLOSING_POSITION"  # 平仓中
+    MODIFYING_POSITION = "MODIFYING_POSITION"  # 修改仓位中
+    MONITORING = "MONITORING"  # 监控中
+    POSITION_OPENED = "POSITION_OPENED"  # 已开仓
+    POSITION_CLOSED = "POSITION_CLOSED"  # 已平仓
+    POSITION_MODIFIED = "POSITION_MODIFIED"  # 已修改仓位
+    ERROR = "ERROR"  # 错误状态
 
 
 @dataclass
@@ -103,6 +118,10 @@ class BaseStrategy(ABC):
         # 因此，我们将订阅操作存储起来，等market_subscriber设置后再执行
         self._pending_subscriptions = set(self.positions.keys())
         
+        # 策略状态
+        self._strategy_status = "IDLE"
+        self._status_message = ""
+        
         self.logger.info("基础策略初始化完成", extra={
             "杠杆": self.leverage,
             "单笔仓位USDT": self.per_position_usdt,
@@ -112,6 +131,71 @@ class BaseStrategy(ABC):
             "委托单位": self.unit_type,
             "允许交易对": list(self.allowed_symbols) if self.enable_symbol_pool else "全部"
         })
+        
+        # 内存缓存 - 避免频繁请求
+        self._contract_size_cache = {}
+    
+    async def _get_contract_size(self, symbol) -> float:
+        """
+        获取合约面值
+        
+        Args:
+            symbol: 合约代码
+            
+        Returns:
+            float: 合约面值
+        """
+        try:
+            # 优先从data_cache中获取
+            if self.data_cache:
+                return await self.data_cache.get_contract_size(symbol)
+            
+            # 如果没有data_cache，从trader获取
+            self.logger.debug(f"从trader获取合约面值: {symbol}")
+            contract_info = self.trader.get_contract_info(symbol, is_spot=False)
+            
+            if contract_info and 'data' in contract_info and len(contract_info['data']) > 0:
+                ct_val = float(contract_info['data'][0].get('ctVal', 1))
+                self.logger.debug(f"获取合约面值成功: {symbol} = {ct_val}")
+                return ct_val
+            
+            # 如果获取失败，使用默认值
+            self.logger.warning(f"无法获取合约面值，使用默认值1: {symbol}")
+            return 1
+        except Exception as e:
+            self.logger.error(f"获取合约面值异常: {e}", exc_info=True)
+            return 1
+            
+    def get_contract_size_sync(self, symbol) -> float:
+        """
+        获取合约面值（同步版本）
+        
+        Args:
+            symbol: 合约代码
+            
+        Returns:
+            float: 合约面值
+        """
+        try:
+            # 优先从data_cache中获取
+            if self.data_cache:
+                return self.data_cache.get_contract_size_sync(symbol)
+            
+            # 如果没有data_cache，从trader获取
+            self.logger.debug(f"从trader获取合约面值: {symbol}")
+            contract_info = self.trader.get_contract_info(symbol, is_spot=False)
+            
+            if contract_info and 'data' in contract_info and len(contract_info['data']) > 0:
+                ct_val = float(contract_info['data'][0].get('ctVal', 1))
+                self.logger.debug(f"获取合约面值成功: {symbol} = {ct_val}")
+                return ct_val
+            
+            # 如果获取失败，使用默认值
+            self.logger.warning(f"无法获取合约面值，使用默认值1: {symbol}")
+            return 1
+        except Exception as e:
+            self.logger.error(f"获取合约面值异常: {e}", exc_info=True)
+            return 1
     
     def _subscribe_market_data(self, symbol: str):
         """
@@ -222,6 +306,13 @@ class BaseStrategy(ABC):
             self.logger.warning(f"未允许交易 {signal.symbol}，不在白名单中")
             return False, f"未允许交易 {signal.symbol}，不在白名单中"
         
+        # 检查风险控制
+        if hasattr(self.position_mgr, 'check_risk_control'):
+            allowed, reason = self.position_mgr.check_risk_control(signal.symbol, signal.extra_data)
+            if not allowed:
+                self.logger.info(f"风控限制交易: {signal.symbol}, {reason}")
+                return False, f"风控限制: {reason}"
+        
         # 确定开仓数量/金额
         position_usdt = self._get_position_usdt(signal)
         leverage = self._get_leverage(signal)
@@ -328,8 +419,8 @@ class BaseStrategy(ABC):
             if "data" in order_result and len(order_result["data"]) > 0:
                 order_id = order_result["data"][0].get("ordId", "unknown")
             
-            # 记录仓位信息
-            timestamp = int(time.time())
+            # 记录仓位信息 - 使用毫秒级时间戳
+            timestamp = int(time.time() * 1000)
             position = Position(
                 symbol=signal.symbol,
                 position_id=order_id,
@@ -377,6 +468,10 @@ class BaseStrategy(ABC):
                 "sl_price": sl_price
             })
             
+            # 记录交易到风控
+            if hasattr(self.position_mgr, 'record_trade'):
+                self.position_mgr.record_trade(signal.symbol)
+            
             return True, f"开仓成功: {signal.symbol} {signal.direction} @ {entry_price}"
         except Exception as e:
             self.logger.exception(f"开仓异常: {e}")
@@ -392,85 +487,150 @@ class BaseStrategy(ABC):
         Returns:
             Tuple[bool, str]: (是否成功, 消息)
         """
-        # 检查是否存在持仓
-        self.logger.info(f"尝试平仓 {signal.symbol}，当前持仓列表: {list(self.positions.keys())}")
+        self.logger.info(f"处理平仓信号: {signal.symbol}", extra={
+            "action": signal.action,
+            "symbol": signal.symbol,
+            "direction": signal.direction
+        })
         
-        if signal.symbol not in self.positions:
-            # 尝试从数据库重新加载持仓
-            self.logger.warning(f"内存中找不到 {signal.symbol} 的持仓，尝试从数据库重新加载")
-            loaded_positions = self.position_mgr.load_positions()
-            if signal.symbol in loaded_positions:
-                self.positions[signal.symbol] = loaded_positions[signal.symbol]
-                self.logger.info(f"从数据库加载到 {signal.symbol} 的持仓")
-            else:
-                # 检查是否有类似的持仓（可能符号格式不完全一致）
-                similar_positions = [pos for pos in self.positions.keys() if signal.symbol.split('-')[0] in pos]
-                if similar_positions:
-                    self.logger.warning(f"找不到 {signal.symbol} 的持仓，但找到了类似的持仓: {similar_positions}")
-                    # 如果有类似的持仓，使用第一个
-                    if len(similar_positions) == 1:
-                        actual_symbol = similar_positions[0]
-                        self.logger.info(f"使用类似的持仓 {actual_symbol} 替代 {signal.symbol}")
-                        signal.symbol = actual_symbol
-                    else:
-                        # 如果有多个类似的持仓，提供详细信息但不自动选择
-                        details = "\n".join([f"{pos}: {self.positions[pos].quantity}" for pos in similar_positions])
-                        return False, f"找不到 {signal.symbol} 的持仓，有多个类似持仓: {details}"
-                else:
-                    # 如果找不到相似的持仓，返回错误
-                    return False, f"不存在 {signal.symbol} 的持仓，且找不到类似持仓"
+        # 更新策略状态
+        self.update_strategy_status(StrategyStatus.HANDLING_SIGNAL)
         
-        position = self.positions[signal.symbol]
-        self.logger.info(f"找到持仓 {signal.symbol}，数量: {position.quantity}, 入场价格: {position.entry_price}")
-        
-        # 执行平仓
         try:
-            # 获取最新价格
-            mark_price = await self.data_cache.get_mark_price(signal.symbol)
-            if not mark_price:
-                return False, f"无法获取 {signal.symbol} 的行情价格"
-            
-            # 确定持仓方向
-            pos_side = "long" if position.quantity > 0 else "short"
-            # 平仓方向与开仓相反
-            side = "sell" if position.quantity > 0 else "buy"
-            
-            self.logger.info(f"准备平仓 {signal.symbol}，方向: {pos_side}, 数量: {abs(position.quantity)}, 当前价格: {mark_price}")
-            
-            # 执行平仓 - 注意这里不使用await，因为swap_order不是异步方法
-            close_result = self.trader.swap_order(
-                inst_id=signal.symbol,
-                side=side,
-                pos_side=pos_side,
-                sz=abs(position.quantity)
-            )
-            
-            self.logger.info(f"平仓结果: {close_result}")
-            
-            if not close_result or close_result.get("code") != "0":
-                return False, f"平仓失败: {close_result}"
-            
-            # 更新仓位状态
-            self.position_mgr.close_position(signal.symbol, mark_price)
-            
-            # 从内存中删除仓位
+            # 首先检查本地缓存中是否存在该仓位
             if signal.symbol in self.positions:
-                del self.positions[signal.symbol]
+                self.logger.info(f"在本地缓存中找到{signal.symbol}的仓位信息，执行平仓")
+                position = self.positions[signal.symbol]
+                await self._execute_close_position(signal.symbol, position)
+                return True, f"成功平仓: {signal.symbol}"
             
-            # 清理价格记录
-            if signal.symbol in self._price_high_low:
-                del self._price_high_low[signal.symbol]
+            # 如果本地缓存没有，尝试从交易所API获取
+            self.logger.info(f"本地缓存没有{signal.symbol}的仓位，尝试从交易所API获取")
+            positions = self.trader.get_positions(inst_type="SWAP")
             
-            self.logger.info(f"平仓成功 {signal.symbol} @ {mark_price}", extra={
-                "symbol": signal.symbol,
-                "exit_price": mark_price,
-                "pnl": (mark_price - position.entry_price) * position.quantity
-            })
+            # 筛选指定交易对的持仓
+            filtered_positions = []
+            for position in positions:
+                inst_id = position.get("instId")
+                if inst_id == signal.symbol and float(position.get("pos", 0) or 0) != 0:
+                    filtered_positions.append(position)
             
-            return True, f"平仓成功: {signal.symbol} @ {mark_price}"
+            if filtered_positions:
+                self.logger.info(f"从交易所API找到{signal.symbol}的持仓信息")
+                for position in filtered_positions:
+                    symbol = position.get("instId")
+                    
+                    # 安全地获取并转换值，处理可能的空字符串或无效值
+                    pos_value = position.get("pos", "0")
+                    pos_value = pos_value if pos_value else "0"
+                    pos_float = float(pos_value)
+                    
+                    direction = "long" if pos_float > 0 else "short"
+                    
+                    # 读取持仓数量、保证金、杠杆倍数、开仓均价等信息 - 安全转换
+                    position_size = abs(pos_float)
+                    
+                    # 安全地处理margin值
+                    margin_value = position.get("margin", "0")
+                    margin_value = margin_value if margin_value and margin_value.strip() else "0"
+                    margin_balance = float(margin_value)
+                    
+                    # 安全地处理lever值
+                    lever_value = position.get("lever", "1")
+                    lever_value = lever_value if lever_value and lever_value.strip() else "1"
+                    leverage = float(lever_value)
+                    
+                    # 安全地处理avgPx值
+                    avg_px_value = position.get("avgPx", "0")
+                    avg_px_value = avg_px_value if avg_px_value and avg_px_value.strip() else "0"
+                    entry_price = float(avg_px_value)
+                    
+                    # 当前市场价格
+                    try:
+                        mark_price = float(self.trader.get_mark_price(symbol) or 0)
+                    except (ValueError, TypeError):
+                        self.logger.warning(f"无法获取有效的市场价格，使用0")
+                        mark_price = 0
+                    
+                    # 计算收益率和杠杆后的收益率
+                    pnl_percent = 0.0
+                    
+                    if position_size > 0 and entry_price > 0:
+                        if direction == "long":
+                            pnl_percent = (mark_price - entry_price) / entry_price
+                        else:  # short
+                            pnl_percent = (entry_price - mark_price) / entry_price
+                    
+                    # 杠杆后的收益率
+                    leveraged_pnl_pct = pnl_percent * leverage
+                    
+                    # 获取合约面值 - 使用同步方法
+                    contract_size = self.get_contract_size_sync(symbol)
+                    
+                    # 计算盈亏金额 - 修正计算方法
+                    # 合约价值 = 数量 * 入场价格 * 合约面值
+                    contract_value = abs(position_size) * entry_price * contract_size
+                    
+                    # 保证金 = 合约价值 / 杠杆倍数
+                    margin = contract_value / leverage
+                    
+                    # 原始盈亏金额（未考虑杠杆）
+                    if direction == "long":
+                        raw_pnl_amount = abs(position_size) * (mark_price - entry_price) * contract_size
+                    else:  # short
+                        raw_pnl_amount = abs(position_size) * (entry_price - mark_price) * contract_size
+                    
+                    # 实际盈亏金额（考虑杠杆）- 实际上是保证金 * 杠杆后的收益率
+                    pnl_amount = margin * leveraged_pnl_pct
+                    
+                    self.logger.info("持仓情况", extra={
+                        "symbol": symbol,
+                        "direction": direction,
+                        "position_size": position_size,
+                        "margin_balance": margin_balance,
+                        "calculated_margin": margin,
+                        "leverage": leverage,
+                        "entry_price": entry_price,
+                        "mark_price": mark_price,
+                        "pnl_percent": pnl_percent,
+                        "leveraged_pnl_pct": leveraged_pnl_pct,
+                        "raw_pnl_amount": raw_pnl_amount,
+                        "pnl_amount": pnl_amount,
+                        "contract_size": contract_size,
+                        "contract_value": contract_value
+                    })
+                    
+                    # 构建仓位对象
+                    timestamp = int(time.time())  # 使用当前时间戳，因为我们没有原始开仓时间
+                    position_obj = Position(
+                        symbol=symbol,
+                        position_id="from_api",  # 由于API没有返回position_id，使用一个标记
+                        entry_price=entry_price,
+                        quantity=pos_float,  # 保留正负号以指示方向
+                        position_type="swap",
+                        leverage=leverage,
+                        timestamp=timestamp
+                    )
+                    
+                    # 执行平仓操作
+                    try:
+                        await self._execute_close_position(symbol, position_obj)
+                        return True, f"成功平仓: {symbol}"
+                    except Exception as e:
+                        self.logger.error(f"平仓失败: {e}", exc_info=True)
+                        # 更新策略状态为错误
+                        self.update_strategy_status(StrategyStatus.ERROR, str(e))
+                        return False, f"平仓失败: {e}"
+            else:
+                self.logger.warning(f"未找到{signal.symbol}的持仓信息，无法平仓")
+                # 更新策略状态为空闲
+                self.update_strategy_status(StrategyStatus.IDLE)
+                return False, f"未找到{signal.symbol}的持仓"
         except Exception as e:
-            self.logger.exception(f"平仓异常: {e}")
-            return False, f"平仓异常: {e}"
+            self.logger.error(f"处理平仓信号异常: {e}", exc_info=True)
+            # 更新策略状态为错误
+            self.update_strategy_status(StrategyStatus.ERROR, str(e))
+            return False, f"处理平仓信号异常: {e}"
     
     async def _handle_modify_signal(self, signal: TradeSignal) -> Tuple[bool, str]:
         """
@@ -572,28 +732,40 @@ class BaseStrategy(ABC):
                     # 计算带杠杆的盈亏百分比
                     leveraged_pnl_pct = pnl_pct * position.leverage
                     
+                    # 获取合约面值
+                    contract_size = self.get_contract_size_sync(symbol)
+                    
                     # 计算盈亏金额 - 修正计算方法
-                    # 合约价值 = 数量 * 入场价格
-                    contract_value = abs(position.quantity) * position.entry_price
+                    # 合约价值 = 数量 * 入场价格 * 合约面值
+                    contract_value = abs(position.quantity) * position.entry_price * contract_size
                     
                     # 保证金 = 合约价值 / 杠杆倍数
                     margin = contract_value / position.leverage
                     
                     # 原始盈亏金额（未考虑杠杆）
-                    raw_pnl_amount = abs(position.quantity) * (mark_price - position.entry_price) if direction == "long" else abs(position.quantity) * (position.entry_price - mark_price)
+                    if direction == "long":
+                        raw_pnl_amount = abs(position.quantity) * (mark_price - position.entry_price) * contract_size
+                    else:  # short
+                        raw_pnl_amount = abs(position.quantity) * (position.entry_price - mark_price) * contract_size
                     
                     # 实际盈亏金额（考虑杠杆）- 实际上是保证金 * 杠杆后的收益率
                     pnl_amount = margin * leveraged_pnl_pct
                     
-                    # 计算持仓时间
+                    # 计算持仓时间 - 确保时间戳格式一致性
                     current_timestamp = int(time.time() * 1000)
-                    holding_time_ms = current_timestamp - position.timestamp
                     
-                    # 检查时间戳是否合理，如果不合理（如过大导致持仓时间超过一年）则可能是格式错误
-                    if holding_time_ms > 365 * 24 * 60 * 60 * 1000:  # 超过一年
-                        # 尝试纠正：假设时间戳可能存储为秒而非毫秒
-                        corrected_timestamp = position.timestamp * 1000 if position.timestamp < 9999999999 else position.timestamp
-                        holding_time_ms = current_timestamp - corrected_timestamp
+                    # 确保position.timestamp是毫秒级时间戳
+                    position_timestamp = position.timestamp
+                    if position_timestamp < 9999999999:  # 如果是秒级时间戳
+                        self.logger.debug(f"检测到秒级时间戳，转换为毫秒级: {position_timestamp} -> {position_timestamp * 1000}")
+                        position_timestamp *= 1000
+                    
+                    holding_time_ms = current_timestamp - position_timestamp
+                    
+                    # 防止出现负值
+                    if holding_time_ms < 0:
+                        self.logger.warning(f"检测到异常的持仓时间(负值)，使用默认值0: {holding_time_ms}ms")
+                        holding_time_ms = 0
                     
                     # 将毫秒转换为小时
                     holding_time_hours = holding_time_ms / (1000 * 60 * 60)
@@ -862,15 +1034,28 @@ class BaseStrategy(ABC):
             # 计算带杠杆的盈亏百分比
             leveraged_pnl_pct = pnl_pct * position.leverage
             
+            # 获取合约面值 - 使用同步方法
+            contract_size = self.get_contract_size_sync(symbol)
+            
             # 计算合约价值和保证金
-            contract_value = abs(position.quantity) * position.entry_price
+            contract_value = abs(position.quantity) * position.entry_price * contract_size
             margin = contract_value / position.leverage
             
             # 计算实际盈亏金额
             pnl_amount = margin * leveraged_pnl_pct
             
             # 更新仓位状态 - 不删除记录，而是标记为已关闭并记录收益信息
-            current_timestamp = int(time.time() * 1000)
+            current_timestamp = int(time.time() * 1000)  # 使用毫秒级时间戳
+            
+            # 确保入场时间戳是毫秒级的
+            entry_timestamp = position.timestamp
+            if entry_timestamp < 9999999999:  # 秒级时间戳
+                entry_timestamp *= 1000
+                
+            # 计算持仓时间用于日志
+            holding_time_ms = current_timestamp - entry_timestamp
+            holding_time_hours = holding_time_ms / (1000 * 60 * 60)
+            
             self.position_mgr.close_position(
                 symbol, 
                 mark_price if mark_price else 0,
@@ -882,7 +1067,7 @@ class BaseStrategy(ABC):
             # 从内存中删除仓位
             if symbol in self.positions:
                 del self.positions[symbol]
-            
+                
             # 清理价格记录
             if symbol in self._price_high_low:
                 del self._price_high_low[symbol]
@@ -980,6 +1165,8 @@ class BaseStrategy(ABC):
         status = {
             "app_name": self.app_name,
             "positions": self.get_position_summary(),
+            "strategy_status": self._strategy_status,
+            "status_message": self._status_message,
             "config": {
                 "leverage": self.leverage,
                 "per_position_usdt": self.per_position_usdt,
@@ -1025,6 +1212,76 @@ class BaseStrategy(ABC):
         """
         return self.position_mgr.get_position_history(start_date, end_date, symbol, limit)
 
+    def update_strategy_status(self, status: str, message: str = ""):
+        """
+        更新策略状态
+        
+        Args:
+            status: 状态名称
+            message: 状态描述消息
+        """
+        self._strategy_status = status
+        self._status_message = message
+        self.logger.info(f"策略状态更新: {status}", extra={"status_detail": message})
+
+    def _execute_close_params(self, params: Dict[str, Any]):
+        """
+        根据参数字典执行平仓操作
+        
+        Args:
+            params: 平仓参数字典，包含symbol、direction、size等信息
+        """
+        try:
+            symbol = params["symbol"]
+            direction = params["direction"]
+            size = params["size"]
+            price = params.get("price")
+            
+            # 更新策略状态
+            self.update_strategy_status(StrategyStatus.CLOSING_POSITION)
+            
+            pos_side = "long" if direction == "buy" else "short"
+            
+            # 执行平仓
+            close_result = self.trader.swap_order(
+                inst_id=symbol,
+                side=direction,
+                pos_side=pos_side,
+                sz=size,
+                px=price
+            )
+            
+            if not close_result or close_result.get("code") != "0":
+                self.logger.error(f"平仓失败: {close_result}")
+                self.update_strategy_status(StrategyStatus.ERROR, f"平仓失败: {close_result}")
+                return
+            
+            # 记录平仓订单
+            self.logger.info("平仓订单已提交", extra={
+                "symbol": symbol,
+                "direction": direction,
+                "size": size,
+                "type": "market" if price is None else "limit"
+            })
+            
+            # 更新策略状态为已平仓
+            self.update_strategy_status(StrategyStatus.POSITION_CLOSED)
+            
+            # 策略状态设置为空闲
+            self.update_strategy_status(StrategyStatus.IDLE)
+            
+            # 从内存中删除持仓信息
+            if symbol in self.positions:
+                del self.positions[symbol]
+                
+            # 清理价格记录
+            if symbol in self._price_high_low:
+                del self._price_high_low[symbol]
+        except Exception as e:
+            self.logger.error(f"执行平仓失败: {e}", exc_info=True)
+            self.update_strategy_status(StrategyStatus.ERROR, str(e))
+            raise
+
 
 class TradingFramework:
     """交易框架，管理策略和信号处理"""
@@ -1046,8 +1303,8 @@ class TradingFramework:
         
         # 初始化组件
         self.trader = OKExTrader(app_name, config['exchange'])
-        self.position_mgr = PositionManager(app_name)
-        self.data_cache = OKExDataCache()
+        self.position_mgr = PositionManager(app_name, self.logger)
+        self.data_cache = OKExDataCache.from_config(config)
         
         # 初始化市场数据订阅器，使用OKEx特定的实现
         self.market_subscriber = OKExMarketSubscriber(self.data_cache, config, app_name)

@@ -5,6 +5,9 @@ from typing import Dict, List, Optional, Tuple
 from threading import Lock
 import time
 import datetime
+import logging
+
+from src.common.risk_control import RiskController
 
 @dataclass
 class Position:
@@ -22,11 +25,23 @@ class Position:
     pnl_percentage: float = 0.0
 
 class PositionManager:
-    def __init__(self, app_name: str):
+    def __init__(self, app_name: str, logger=None):
+        """
+        初始化仓位管理器
+        
+        Args:
+            app_name: 应用名称
+            logger: 日志记录器，如果不提供则使用应用名称创建一个
+        """
         self.app_name = app_name
         self.db_path = os.path.join("databases", f"{app_name}.db")
         self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self.db_lock = Lock()
+        self.logger = logger or logging.getLogger(f"{app_name}.position")
+        
+        # 初始化风控器
+        self.risk_controller = RiskController(self.logger)
+        
         self._init_db()
     
     def _init_db(self):
@@ -272,4 +287,64 @@ class PositionManager:
             else:
                 holding_time_months = holding_time_days / 30
                 return f"{holding_time_months:.2f}月 ({holding_time_days:.1f}天)"
+    
+    def configure_risk_control(self, config: Dict[str, any]) -> None:
+        """
+        配置风险控制模块
+        
+        Args:
+            config: 风控配置参数
+        """
+        if self.risk_controller:
+            self.risk_controller.configure(config)
+            self.logger.info("已更新风控配置")
+    
+    def reset_daily_risk_control(self) -> None:
+        """重置每日风控计数器"""
+        if self.risk_controller:
+            self.risk_controller.reset_daily_counters()
+            self.logger.info("已重置风控每日计数器")
+    
+    def update_risk_pnl(self, pnl_pct: float) -> None:
+        """
+        更新风控的当日盈亏百分比
+        
+        Args:
+            pnl_pct: 盈亏百分比
+        """
+        if self.risk_controller:
+            self.risk_controller.update_daily_pnl(pnl_pct)
+    
+    def check_risk_control(self, symbol: str, signal_extra_data: Optional[Dict[str, any]] = None) -> Tuple[bool, str]:
+        """
+        检查风控条件
+        
+        Args:
+            symbol: 交易标的
+            signal_extra_data: 信号中的额外数据，包含风控参数
+            
+        Returns:
+            Tuple[bool, str]: (是否允许, 原因)
+        """
+        if not self.risk_controller:
+            return True, "未启用风控"
+            
+        allowed, reason = self.risk_controller.check_risk_control(symbol, signal_extra_data)
+        
+        if allowed:
+            self.logger.debug(f"{symbol} 风控检查通过: {reason}")
+        else:
+            self.logger.info(f"{symbol} 风控限制: {reason}")
+            
+        return allowed, reason
+    
+    def record_trade(self, symbol: str) -> None:
+        """
+        记录交易信息到风控
+        
+        Args:
+            symbol: 交易标的
+        """
+        if self.risk_controller:
+            self.risk_controller.record_trade(symbol)
     

@@ -90,9 +90,16 @@ class OKExTrader(ExchangeAdapter):
             
             result = response.json()
             if result.get("code") != "0":
-                error_data = result.get("data", [{}])[0]
+                # 修复 data 为空列表时的索引越界问题
+                data_list = result.get("data", [{}])
+                error_msg = result.get("msg", "未知错误")
+                
+                if data_list and len(data_list) > 0:
+                    error_data = data_list[0]
+                    error_msg = error_data.get('sMsg', error_msg)
+                
                 self.logger.error(
-                    f"请求失败: {path} | Code: {result.get('code')} | Msg: {error_data.get('sMsg', result.get('msg'))}",
+                    f"请求失败: {path} | Code: {result.get('code')} | Msg: {error_msg}",
                     extra={"params": params}  # 记录请求参数
                 )
             
@@ -183,14 +190,31 @@ class OKExTrader(ExchangeAdapter):
 
     # ------------------- 账户接口 -------------------
     def get_usdt_balance(self) -> float:
-        """获取可用USDT余额"""
+        """获取USDT可用余额"""
         response = self._request("GET", "/api/v5/account/balance")
-        for detail in response['data'][0]['details']:
-            if detail['ccy'] == 'USDT':
-                balance = float(detail['availBal'])
-                self.logger.info("账户余额查询", extra={"usdt_balance": balance})
-                return balance
-        return 0.0
+        try:
+            for item in response.get('data', []):
+                for detail in item.get('details', []):
+                    if detail['ccy'] == 'USDT':
+                        balance = float(detail['availBal'])
+                        self.logger.info("账户余额查询", extra={"usdt_balance": balance})
+                        return balance
+            return 0.0
+        except Exception as e:
+            self.logger.error(f"获取USDT余额异常: {e}")
+            return 0.0
+            
+    def get_account_balance(self) -> dict:
+        """获取完整的账户余额信息"""
+        response = self._request("GET", "/api/v5/account/balance")
+        self.logger.info("获取完整账户余额信息")
+        return response
+        
+    def get_tickers(self) -> list:
+        """获取所有交易对的ticker信息"""
+        response = self._request("GET", "/api/v5/market/tickers", {"instType": "SWAP"})
+        self.logger.info("获取所有交易对ticker信息")
+        return response.get('data', [])
 
     # ------------------- 工具函数 -------------------
     def calculate_position_size(self, inst_id: str, is_spot: bool, target_usdt: float, target_leverage: float = 0) -> float:
@@ -273,25 +297,117 @@ class OKExTrader(ExchangeAdapter):
             "bar": bar,
             "limit": str(min(limit, 300))  # API限制最大300条
         }
-        response = self._request("GET", "/api/v5/market/candles", params)
-        candles = response.get('data', [])
-        self.logger.debug("获取K线数据", extra={"inst_id": inst_id, "bar": bar, "count": len(candles)})
+        try:
+            response = self._request("GET", "/api/v5/market/candles", params)
+            candles = response.get('data', [])
+            
+            # 添加更详细的日志
+            log_data = {
+                "inst_id": inst_id, 
+                "bar": bar, 
+                "count": len(candles)
+            }
+            
+            # 添加数据样例，但避免可能的索引错误
+            if candles and len(candles) > 0:
+                log_data["data_sample"] = candles[0]
+            else:
+                log_data["data_sample"] = "No data"
+                
+            self.logger.debug("获取K线数据", extra=log_data)
+            
+            # 特别处理错误情况
+            if not candles or len(candles) == 0:
+                self.logger.warning(f"获取K线数据为空: {inst_id}, {bar}, 响应: {response}")
+            
+            return candles
+        except Exception as e:
+            self.logger.error(f"获取K线数据异常: {inst_id}, {bar}, 错误: {e}", exc_info=True)
+            return []
+    
+    def get_open_interest_history(self, inst_id: str, bar: str = "5m", limit: int = 100) -> list:
+        """获取持仓量历史数据
         
-        # 处理返回数据，转换为更易用的格式
-        formatted_candles = []
-        for candle in candles:
-            # OKEx K线格式: [timestamp, open, high, low, close, vol, volCcy]
-            formatted_candles.append({
-                "timestamp": int(candle[0]),
-                "open": float(candle[1]),
-                "high": float(candle[2]),
-                "low": float(candle[3]),
-                "close": float(candle[4]),
-                "volume": float(candle[5]),
-                "volume_ccy": float(candle[6])
-            })
+        Args:
+            inst_id: 交易对/合约ID
+            bar: 数据周期，如 5m, 1H, 1D
+            limit: 返回的数据数量，最大值为100
+            
+        Returns:
+            持仓量数据列表
+        """
+        params = {
+            "instId": inst_id,
+            "period": bar,
+            "limit": str(min(limit, 100))  # API可能有限制
+        }
+        try:
+            response = self._request("GET", "/api/v5/public/open-interest-archive", params)
+            data = response.get('data', [])
+            
+            # 添加更详细的日志
+            log_data = {
+                "inst_id": inst_id, 
+                "bar": bar, 
+                "count": len(data)
+            }
+            
+            # 添加数据样例，但避免可能的索引错误
+            if data and len(data) > 0:
+                log_data["data_sample"] = data[0]
+            else:
+                log_data["data_sample"] = "No data"
+                
+            self.logger.debug("获取持仓量历史数据", extra=log_data)
+            
+            # 特别处理错误情况
+            if not data or len(data) == 0:
+                self.logger.warning(f"获取持仓量历史数据为空: {inst_id}, {bar}, 响应: {response}")
+            
+            # API返回的结构大概是 {'ts': '1634841600000', 'oi': '12345.67', 'oiCcy': '123.45', 'instType': 'SWAP', 'instId': 'BTC-USDT-SWAP'}
+            return data
+        except Exception as e:
+            self.logger.error(f"获取持仓量历史数据异常: {inst_id}, {bar}, 错误: {e}", exc_info=True)
+            return []
+    
+    def get_open_interest(self, inst_id: str) -> dict:
+        """获取当前持仓量数据
         
-        return formatted_candles
+        Args:
+            inst_id: 交易对/合约ID
+            
+        Returns:
+            当前持仓量数据
+        """
+        params = {
+            "instId": inst_id
+        }
+        try:
+            response = self._request("GET", "/api/v5/public/open-interest", params)
+            data_list = response.get('data', [])
+            
+            # 获取第一个数据项，如果存在的话
+            data = data_list[0] if data_list and len(data_list) > 0 else {}
+            
+            # 添加更详细的日志
+            log_data = {
+                "inst_id": inst_id,
+                "has_data": bool(data)
+            }
+            
+            if data:
+                log_data["data"] = data
+                
+            self.logger.debug("获取当前持仓量数据", extra=log_data)
+            
+            # 特别处理错误情况
+            if not data:
+                self.logger.warning(f"获取当前持仓量数据为空: {inst_id}, 响应: {response}")
+            
+            return data
+        except Exception as e:
+            self.logger.error(f"获取当前持仓量数据异常: {inst_id}, 错误: {e}", exc_info=True)
+            return {}
 
     def batch_orders(self, orders: list) -> dict:
         """批量下单

@@ -240,7 +240,8 @@ class OKExMarketSubscriber(BaseMarketSubscriber):
         return [
             {"channel": "mark-price", "instId": symbol},
             {"channel": "index-tickers", "instId": symbol},
-            {"channel": "instruments", "instId": symbol}
+            {"channel": "instruments", "instId": symbol},
+            {"channel": "open-interest", "instId": symbol}
         ]
     
     def _is_channel_for_symbol(self, channel: Dict[str, Any], symbol: str) -> bool:
