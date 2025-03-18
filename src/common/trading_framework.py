@@ -207,8 +207,13 @@ class BaseStrategy(ABC):
         # 这个方法会被TradingFramework替换，但为了完整性，我们仍提供一个基本实现
         if self.market_subscriber:
             try:
-                self.logger.info(f"订阅 {symbol} 行情数据")
+                self.logger.info(f"开始订阅交易对: {symbol}")
+                # 订阅行情
                 asyncio.ensure_future(self.market_subscriber.subscribe_symbol(symbol))
+                
+                # 订阅持仓量（如果WebSocket客户端支持）
+                if hasattr(self.market_subscriber, 'subscribe_open_interest'):
+                    asyncio.ensure_future(self.market_subscriber.subscribe_open_interest(symbol))
             except Exception as e:
                 self.logger.error(f"订阅 {symbol} 行情数据失败: {e}")
         else:

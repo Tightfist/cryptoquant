@@ -330,7 +330,7 @@ class OKExTrader(ExchangeAdapter):
         
         Args:
             inst_id: 交易对/合约ID
-            bar: 数据周期，如 5m, 1H, 1D
+            bar: 数据周期，如 5m, 15m, 30m, 1H, 2H, 4H, 6H, 12H, 1D, 1W, 1M
             limit: 返回的数据数量，最大值为100
             
         Returns:
@@ -339,11 +339,23 @@ class OKExTrader(ExchangeAdapter):
         params = {
             "instId": inst_id,
             "period": bar,
-            "limit": str(min(limit, 100))  # API可能有限制
+            "limit": str(min(limit, 100))  # API限制最大100条
         }
         try:
-            response = self._request("GET", "/api/v5/public/open-interest-archive", params)
-            data = response.get('data', [])
+            response = self._request("GET", "/api/v5/rubik/stat/contracts/open-interest-history", params)
+            raw_data = response.get('data', [])
+            
+            # 转换数据格式：从数组格式 [ts, oi, oiCcy, oiUsd] 转为对象格式 {ts, oi, oiCcy}
+            data = []
+            for item in raw_data:
+                if len(item) >= 3:  # 确保至少有时间戳、持仓量和币种持仓量
+                    data.append({
+                        'ts': item[0],           # 时间戳
+                        'oi': item[1],           # 持仓量（合约）
+                        'oiCcy': item[2],        # 持仓量（币）
+                        'instType': 'SWAP',      # 固定为SWAP
+                        'instId': inst_id        # 使用传入的inst_id
+                    })
             
             # 添加更详细的日志
             log_data = {
@@ -362,9 +374,8 @@ class OKExTrader(ExchangeAdapter):
             
             # 特别处理错误情况
             if not data or len(data) == 0:
-                self.logger.warning(f"获取持仓量历史数据为空: {inst_id}, {bar}, 响应: {response}")
+                self.logger.warning(f"获取持仓量历史数据为空: {inst_id}, {bar}, 原始响应数据: {raw_data}")
             
-            # API返回的结构大概是 {'ts': '1634841600000', 'oi': '12345.67', 'oiCcy': '123.45', 'instType': 'SWAP', 'instId': 'BTC-USDT-SWAP'}
             return data
         except Exception as e:
             self.logger.error(f"获取持仓量历史数据异常: {inst_id}, {bar}, 错误: {e}", exc_info=True)

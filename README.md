@@ -1,422 +1,348 @@
-# CryptoQuant 量化交易系统
+# CryptoQuant 高性能加密货币量化交易系统
 
-这是一个加密货币量化交易系统，目前支持 OKEx 交易所 API，提供多种交易策略和工具。系统采用模块化设计，包含多个独立的应用程序，共享底层的交易和数据处理组件。
+CryptoQuant是一个高性能、模块化的加密货币量化交易系统，专注于捕捉短期市场机会和风险控制。系统采用异步架构，支持多策略并行执行，提供实时数据处理和信号生成能力。
 
-## 项目框架图
-
-```
-+--------------------------------------------------+
-|                                                  |
-|  策略/应用层 (Strategies/Applications)           |
-|                                                  |
-|  +--------------------+  +--------------------+  |
-|  | TradingView信号追踪器|  | 资金费率套利策略   |  |
-|  +--------------------+  +--------------------+  |
-|                                                  |
-|  +--------------------+  +--------------------+  |
-|  | 价格监控工具        |  | 其他自定义策略     |  |
-|  +--------------------+  +--------------------+  |
-|                                                  |
-+---------------------+----------------------------+
-                      |
-                      | 使用
-                      v
-+--------------------------------------------------+
-|                                                  |
-|  交易框架层 (Trading Framework)                  |
-|                                                  |
-|  +--------------------+  +--------------------+  |
-|  | TradingFramework   |  | BaseStrategy       |  |
-|  | - 初始化组件       |  | - 信号处理         |  |
-|  | - 连接各层         |  | - 仓位管理         |  |
-|  | - 运行主循环       |  | - 止盈止损         |  |
-|  +--------------------+  +--------------------+  |
-|                                                  |
-+------------+---------------+--------------------+
-             |               |                    |
-             v               v                    v
-+---------------------------+ +------------------+ +------------------+
-|                           | |                  | |                  |
-|  仓位管理 (Positions)     | |  数据层 (Data)   | | 交易执行(Execution)|
-|                           | |                  | |                  |
-|  +---------------------+  | |  +-------------+ | |  +-------------+ |
-|  | PositionManager     |  | |  |OKExDataCache| | |  | OKExTrader  | |
-|  | - 仓位跟踪          |  | |  |- 行情数据缓存| | |  |- 订单执行   | |
-|  | - 数据库存储        |  | |  |- 价格查询    | | |  |- API交互    | |
-|  | - 收益统计          |  | |  +-------------+ | |  |- 杠杆设置    | |
-|  +---------------------+  | |                  | |  +-------------+ |
-|                           | |  +-------------+ | |                  |
-+---------------------------+ |  |OKExMarket-  | | +------------------+
-                              |  |Subscriber   | |
-                              |  |- WebSocket订阅| |
-                              |  |- 数据更新    | |
-                              |  +-------------+ |
-                              |                  |
-                              +------------------+
-```
-
-## 核心组件说明
-
-1. **策略/应用层 (Strategies/Applications)**
-   - 具体的交易策略实现，如TradingView信号追踪器、资金费率套利策略等
-   - 每个策略同时也是一个独立的应用程序
-   - 负责配置加载、实现特定交易逻辑
-   - 提供用户界面或API接口
-
-2. **交易框架层 (Trading Framework)**
-   - 核心框架组件，提供策略开发的基础设施
-   - TradingFramework: 初始化和管理所有组件，运行主循环
-   - BaseStrategy: 提供通用的策略基础功能，如信号处理、仓位管理、止盈止损
-   - 连接策略层与底层组件
-
-3. **仓位管理 (Position Manager)**
-   - 跟踪和管理所有交易仓位
-   - 提供数据库持久化存储
-   - 计算收益和风险指标
-   - 提供历史仓位和每日收益查询
-
-4. **数据层 (Data)**
-   - 数据缓存: 存储和管理市场数据
-   - 市场订阅器: 通过WebSocket订阅实时行情
-   - 提供高效的数据访问接口
-
-5. **交易执行 (Execution)**
-   - 执行交易指令
-   - 管理订单生命周期
-   - 处理交易所API交互
-   - 设置杠杆和其他交易参数
-
-## 项目结构
+## 系统架构
 
 ```
-cryptoquant/
-├── apps/                      # 应用程序目录
-│   ├── funding_arbitrage/     # 资金费率套利策略
-│   ├── price/                 # 价格监控工具
-│   ├── trader_tools/          # 交易工具集
-│   ├── tradingview_signal_tracker/ # TradingView信号追踪器
-│   └── strategy_template/     # 策略模板示例
-├── src/                       # 共享源代码
-│   ├── common/                # 通用组件
-│   │   ├── config_loader.py   # 配置加载器
-│   │   ├── data_cache.py      # 数据缓存
-│   │   ├── event_loop.py      # 事件循环
-│   │   ├── logger.py          # 日志工具
-│   │   ├── market_subscriber.py # 市场数据订阅器
-│   │   ├── order_utils.py     # 订单工具
-│   │   ├── position_manager.py # 仓位管理器
-│   │   ├── trading_framework.py # 交易框架
-│   │   ├── http/              # HTTP相关组件
-│   │   │   ├── server.py      # HTTP服务器
-│   │   │   └── api_handlers/  # API请求处理器
-│   │   ├── scripts/           # 通用脚本工具
-│   │   └── websocket/         # WebSocket组件
-│   └── exchange/              # 交易所接口
-│       └── okex/              # OKEx交易所适配器
-│           ├── trader.py      # OKEx交易执行器
-│           └── websocket.py   # OKEx WebSocket适配器
-├── config/                    # 配置文件目录
-│   ├── api.json               # 交易所API通用配置
-│   ├── funding_arbitrage.json # 资金费率套利特定配置
-│   ├── price.json             # 价格监控特定配置
-│   ├── trader_tools.json      # 交易工具特定配置
-│   ├── tradingview_signal_tracker.json # TradingView信号追踪器特定配置
-│   └── strategy_template.json # 策略模板特定配置
-├── databases/                 # 数据库目录
-├── logs/                      # 日志目录
-└── tests/                     # 测试目录
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                          CryptoQuant 系统架构                                 │
+├──────────────────┬───────────────────────────┬───────────────────────────────┤
+│                  │                           │                               │
+│  应用层           │         核心框架          │         工具和服务             │
+│                  │                           │                               │
+├──────────────────┼───────────────────────────┼───────────────────────────────┤
+│                  │                           │                               │
+│ ┌───────────────┐│ ┌─────────────────────┐   │  ┌─────────────────────────┐  │
+│ │ 短线逐利策略   ││ │   交易框架          │   │  │      数据分析工具        │  │
+│ └───────────────┘│ │ TradingFramework    │   │  │    (因子分析、回测)      │  │
+│                  │ └─────────────────────┘   │  └─────────────────────────┘  │
+│ ┌───────────────┐│                           │                               │
+│ │ TradingView   ││ ┌─────────────────────┐   │  ┌─────────────────────────┐  │
+│ │ 信号追踪器     ││ │    仓位管理器       │   │  │       HTTP服务器         │  │
+│ └───────────────┘│ │  PositionManager    │   │  │      HttpServer         │  │
+│                  │ └─────────────────────┘   │  └─────────────────────────┘  │
+│ ┌───────────────┐│                           │                               │
+│ │ 资金费率套利   ││ ┌─────────────────────┐   │  ┌─────────────────────────┐  │
+│ └───────────────┘│ │     数据缓存         │   │  │       风控模块          │  │
+│                  │ │    DataCache        │   │  │     RiskControl         │  │
+│ ┌───────────────┐│ └─────────────────────┘   │  └─────────────────────────┘  │
+│ │   价格监控     ││                           │                               │
+│ └───────────────┘│ ┌─────────────────────┐   │  ┌─────────────────────────┐  │
+│                  │ │    交易接口         │   │  │    异步事件循环          │  │
+│ ┌───────────────┐│ │     Trader         │   │  │    AsyncEventLoop       │  │
+│ │   交易工具     ││ └─────────────────────┘   │  └─────────────────────────┘  │
+│ └───────────────┘│                           │                               │
+│                  │ ┌─────────────────────┐   │  ┌─────────────────────────┐  │
+│ ┌───────────────┐│ │  行情数据订阅器     │   │  │      日志系统           │  │
+│ │   策略模板     ││ │ MarketSubscriber   │   │  │       Logger            │  │
+│ └───────────────┘│ └─────────────────────┘   │  └─────────────────────────┘  │
+│                  │                           │                               │
+├──────────────────┴───────────────────────────┴───────────────────────────────┤
+│                                                                              │
+│                                交易所接口层                                   │
+│                                                                              │
+├──────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│                                 OKEx API                                     │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
 ```
 
-## 应用程序
+## 主要特点
 
-### TradingView信号追踪器
+- **高性能异步架构**: 采用Python AsyncIO异步编程范式，最大化I/O密集型操作效率
+- **实时数据处理**: 通过WebSocket接口实时接收和处理行情数据，毫秒级响应
+- **多策略支持**: 支持多个交易策略并行执行，便于分散风险和捕捉不同市场机会
+- **风控机制**: 内置多层次风险控制，包括仓位管理、止盈止损、下单频率限制和资金使用限制
+- **高效缓存**: 基于内存的数据缓存系统，减少API调用频率，提高性能并避免触发交易所限流
+- **HTTP API接口**: 提供RESTful API接口用于监控和控制策略执行，支持远程管理
+- **分析工具**: 内置多种分析工具，用于评估策略性能、市场状况和因子有效性
+- **灵活配置**: 通过JSON配置文件，灵活调整策略参数、风控设置和系统行为
+- **模块化设计**: 组件化、松耦合设计，便于扩展和自定义新功能
 
-TradingView信号追踪器可以接收并执行来自TradingView的交易信号，支持开仓、平仓、止盈止损等操作。
+## 主要组件
 
-**主要功能**:
-- 接收TradingView的Webhook信号
-- 自动执行开仓和平仓操作
-- 支持止盈止损和追踪止损设置
-- 自动生成API交互脚本
-- 支持交易对白名单管理
+### 核心框架
 
-**使用方法**:
+- **交易框架 (TradingFramework)**: 提供策略执行的基础架构，处理信号接收、分析和执行
+- **仓位管理器 (PositionManager)**: 管理和跟踪所有交易仓位，提供统一的仓位操作接口
+- **数据缓存 (DataCache)**: 缓存行情数据、K线和其他市场信息，减少API调用频率
+- **交易接口 (Trader)**: 提供统一的交易接口，处理订单创建、修改和取消
+- **行情订阅器 (MarketSubscriber)**: 通过WebSocket接收实时市场数据
+- **风控模块 (RiskControl)**: 提供多层风险控制机制，保护资金安全
+
+### 应用层
+
+- **短线逐利策略 (Short-Term Profit Strategy)**: 基于多因子模型的短期交易策略，专注捕捉价格波动
+- **TradingView信号追踪器**: 接收并执行来自TradingView的交易信号，支持多交易对和自定义参数
+- **资金费率套利 (Funding Arbitrage)**: 针对永续合约和交割合约之间的资金费率差异进行套利
+- **价格监控 (Price)**: 实时监控加密货币价格和资产信息，支持多种显示和提醒方式
+- **交易工具 (Trader Tools)**: 提供多种实用交易工具，如批量下单、仓位计算和杠杆设置
+- **策略模板 (Strategy Template)**: 用于快速开发新策略的基础模板，包含完整的框架集成
+
+### 服务和工具
+
+- **HTTP服务器**: 提供RESTful API，用于远程控制和监控策略执行
+- **异步事件循环**: 管理异步任务执行，提供高效的I/O操作
+- **日志系统**: 详细记录系统操作和异常情况，支持多级别日志
+- **配置加载器**: 处理JSON配置文件的加载和验证
+- **分析工具**: 提供因子分析、回测和性能评估功能
+
+## 应用程序详情
+
+### 短线逐利策略 (Short-Term Profit Strategy)
+
+专注于捕捉短期价格波动机会的量化交易策略，基于多因子分析模型。
+
+**主要特点:**
+- 多因子分析: 综合价格变化、持仓量变化和成交量比率等因子
+- 自动扫描: 定期扫描所有交易对，寻找符合条件的交易机会
+- 优化的5分钟级别分析: 专注于最近5分钟的市场变化，捕捉短期机会
+- 自动止盈止损: 内置多层次止盈止损机制，保护资金安全
+- 实时监控: 持续监控开仓条件，及时调整持仓
+
+[详细文档](apps/short_term_profit_strategy/README.md)
+
+### TradingView信号追踪器 (TradingView Signal Tracker)
+
+接收并执行来自TradingView的交易信号，支持多种交易对和交易策略。
+
+**主要特点:**
+- WebSocket服务器: 接收TradingView的Alert Webhook信号
+- HTTP API: 提供手动触发信号的API接口
+- 多交易对支持: 可同时监控和交易多个交易对
+- 仓位持久化: 在程序重启后恢复仓位信息
+- 止损设置: 支持跟踪止损和固定止损
+
+[详细文档](apps/tradingview_signal_tracker/README.md)
+
+### 资金费率套利 (Funding Arbitrage)
+
+利用永续合约和交割合约之间的资金费率差异进行套利的策略。
+
+**主要特点:**
+- 自动识别: 识别资金费率显著偏离的合约对
+- 仓位对冲: 在永续合约和交割合约之间建立对冲仓位
+- 资金费获取: 通过持有对冲仓位获取资金费收益
+- 风险控制: 监控价差风险，动态调整仓位
+
+[详细文档](apps/funding_arbitrage/README.md)
+
+### 价格监控 (Price)
+
+实时监控加密货币价格和资产信息的工具。
+
+**主要特点:**
+- 价格监控: 实时显示加密货币价格和涨跌幅
+- 资产查询: 查询账户资产和仓位信息
+- 历史数据分析: 支持K线数据查询和简单分析
+- 自定义刷新间隔: 可设置数据刷新频率
+- 多种输出方式: 支持控制台、通知和API返回
+
+[详细文档](apps/price/README.md)
+
+### 交易工具 (Trader Tools)
+
+提供多种实用交易工具和功能的应用。
+
+**主要特点:**
+- 快速下单: 支持快速市价和限价订单
+- 批量操作: 批量设置杠杆和下单
+- 仓位计算: 根据风险和账户余额计算合适的仓位大小
+- 杠杆设置: 快速调整合约杠杆
+- 余额查询: 查询账户余额和资产分布
+- IPO参与: 简化新币上线认购流程
+
+[详细文档](apps/trader_tools/README.md)
+
+### 策略模板 (Strategy Template)
+
+用于快速开发新策略的基础模板，包含完整的框架集成。
+
+**主要特点:**
+- 完整框架: 集成交易框架的所有核心功能
+- 标准接口: 提供标准的信号处理和仓位管理接口
+- 示例实现: 包含示例策略实现和注释
+- HTTP API: 预配置的API接口
+- 配置示例: 包含详细的配置文件示例
+
+[详细文档](apps/strategy_template/README.md)
+
+## 快速开始
+
+### 安装
+
+1. 克隆项目仓库:
+```bash
+git clone https://github.com/yourusername/cryptoquant.git
+cd cryptoquant
+```
+
+2. 安装依赖:
+```bash
+pip install -r requirements.txt
+```
+
+3. 配置API密钥:
+在`config`目录下创建相应的配置文件，填入交易所API密钥和策略参数。
+
+### 运行应用
+
+**短线逐利策略:**
+```bash
+python apps/short_term_profit_strategy/main.py
+```
+
+**TradingView信号追踪器:**
 ```bash
 python apps/tradingview_signal_tracker/main.py
 ```
 
-详情请参阅 [TradingView信号追踪器文档](apps/tradingview_signal_tracker/README.md)
-
-### 资金费率套利
-
-资金费率套利策略利用永续合约的资金费率进行套利，在资金费率为正时做空合约并同时做多现货，赚取资金费。
-
-**主要功能**:
-- 自动检测套利机会
-- 执行合约做空和现货做多的套利组合
-- 支持多种平仓条件
-- 自动计算盈亏
-
-**使用方法**:
+**资金费率套利:**
 ```bash
 python apps/funding_arbitrage/main.py
 ```
 
-### 策略模板
-
-策略模板提供了一个基础框架，可用于快速开发新的交易策略。模板包含了常见的策略组件和功能，如信号处理、仓位管理、风险控制等。
-
-**主要功能**:
-- 提供策略开发的标准模板
-- 包含完整的API接口和处理逻辑
-- 内置常用的交易工具和功能
-
-**使用方法**:
+**价格监控:**
 ```bash
-# 复制策略模板
-cp -r apps/strategy_template apps/my_new_strategy
-
-# 编辑配置文件
-nano config/my_new_strategy.json
-
-# 运行策略
-python apps/my_new_strategy/main.py
+python apps/price/main.py
 ```
 
-### 交易工具集
-
-交易工具集提供了一系列命令行工具，用于执行常见的交易操作，如批量下单、平仓、查询余额等。
-
-**主要功能**:
-- 批量下单
-- 批量平仓
-- 查询账户余额
-- 打新币
-
-**使用方法**:
+**交易工具:**
 ```bash
-python apps/trader_tools/main.py --mode order --symbols btc eth --amount 100 --leverage 3 --side buy --price-type market
-python apps/trader_tools/main.py --mode close --symbols btc eth --price-type market
-python apps/trader_tools/main.py --mode balance
+python apps/trader_tools/main.py
 ```
 
-## 共享组件
+### 配置
 
-### 交易框架 (trading_framework.py)
+所有策略配置文件位于`config`目录下。主要配置示例:
 
-提供统一的仓位管理和交易执行框架，支持止盈止损、追踪止损、仓位持久化等功能。
-
-```python
-from src.common.trading_framework import TradingFramework, BaseStrategy
-
-# 创建策略类
-class MyStrategy(BaseStrategy):
-    async def process_signal(self, signal_data):
-        # 处理信号的逻辑
-        return True, "处理成功"
-
-# 初始化交易框架
-framework = TradingFramework(
-    app_name="my_app",
-    strategy_class=MyStrategy,
-    config=config
-)
-
-# 启动框架
-await framework.run_forever()
-```
-
-### 市场数据订阅器 (market_subscriber.py)
-
-订阅和处理交易所的实时行情数据。
-
-```python
-from src.common.market_subscriber import OKExMarketSubscriber
-
-# 创建市场数据订阅器
-subscriber = OKExMarketSubscriber(data_cache, config, "my_app")
-
-# 启动订阅器
-await subscriber.start()
-
-# 订阅特定交易对
-await subscriber.subscribe_symbol("BTC-USDT-SWAP")
-```
-
-### 订单工具 (order_utils.py)
-
-提供通用的订单计算功能，如计算订单大小等。
-
-```python
-from src.common.order_utils import calculate_order_size
-
-# 计算订单大小
-size = calculate_order_size(
-    price=50000,
-    amount=100,
-    unit_type="quote",
-    leverage=3
-)
-```
-
-### 仓位管理器 (position_manager.py)
-
-管理交易仓位，支持仓位的保存、加载和更新。
-
-```python
-from src.common.position_manager import PositionManager, Position
-
-# 创建仓位管理器
-position_mgr = PositionManager("app_name")
-
-# 创建仓位
-position = Position(
-    symbol="BTC-USDT-SWAP",
-    position_id="123456",
-    entry_price=50000,
-    quantity=0.1,
-    position_type="swap",
-    leverage=3,
-    timestamp=int(time.time())
-)
-
-# 保存仓位
-position_mgr.save_position(position)
-
-# 加载仓位
-positions = position_mgr.load_positions()
-
-# 平仓
-position_mgr.close_position("BTC-USDT-SWAP", 55000)
-```
-
-### HTTP API处理器 (http/api_handlers/trading_framework_api.py)
-
-提供统一的HTTP API处理器，用于处理交易框架的API请求。
-
-```python
-from src.common.http.api_handlers import TradingFrameworkApiHandler
-
-# 创建API处理器
-api_handler = TradingFrameworkApiHandler(framework, "my_app")
-
-# 注册API路由
-api_handler.register_routes(app, base_path="/webhook")
-```
-
-### API脚本生成器 (scripts/generate_api_scripts.py)
-
-自动生成与交易框架API交互的Shell脚本。
-
-```python
-from src.common.scripts.generate_api_scripts import generate_api_scripts
-
-# 生成API脚本
-scripts = generate_api_scripts(
-    target_dir="./scripts",
-    app_name="my_app",
-    port="8080",
-    base_path="/webhook"
-)
-```
-
-### 交易执行器 (exchange/okex/trader.py)
-
-提供与交易所的交互功能，如下单、查询价格、获取余额等。目前支持 OKEx 交易所。
-
-```python
-from src.exchange.okex.trader import OKExTrader
-
-# 创建交易执行器
-trader = OKExTrader("app_name", config)
-
-# 设置杠杆
-trader.set_leverage("BTC-USDT-SWAP", 3)
-
-# 下单
-trader.swap_order(
-    inst_id="BTC-USDT-SWAP",
-    side="buy",
-    pos_side="long",
-    sz=0.1
-)
-
-# 获取价格
-price = trader.get_mark_price("BTC-USDT-SWAP")
-```
-
-## 配置
-
-系统采用模块化的配置文件结构，所有配置文件都存放在 `config/` 目录下，采用JSON格式。
-
-### 配置文件组织
-
-- **api.json**: 包含交易所API的通用配置，如API密钥、密码等
-- **<app_name>.json**: 每个应用程序的特定配置文件，包含该应用的特殊参数
-
-这种组织方式避免了在多个应用中重复配置API信息，使配置更加清晰和易于维护。
-
-### API配置示例 (api.json)
-
+**短线逐利策略配置 (short_term_profit_strategy.json):**
 ```json
 {
-  "exchange": {
-    "type": "okex",
-    "api_key": "your_api_key",
-    "secret_key": "your_secret_key",
-    "passphrase": "your_passphrase",
-    "is_simulated": true
-  },
-  "logging": {
+  "log": {
     "level": "INFO",
-    "output_targets": ["file", "console"]
-  }
-}
-```
-
-### 应用特定配置示例 (tradingview_signal_tracker.json)
-
-```json
-{
-  "app_name": "tradingview_signal_tracker",
-  "webhook": {
-    "host": "0.0.0.0",
-    "port": 80,
-    "path": "/webhook"
+    "file": "logs/short_term_profit_strategy.log"
   },
-  "logging": {
-    "file": "tradingview_signal_tracker.log"
+  "exchange": {
+    "api_key": "YOUR_API_KEY",
+    "secret_key": "YOUR_SECRET_KEY",
+    "passphrase": "YOUR_PASSPHRASE"
   },
   "strategy": {
     "leverage": 3,
-    "per_position_usdt": 100,
-    "take_profit_pct": 0.05,
-    "stop_loss_pct": 0.03,
-    "trailing_stop": true,
-    "trailing_distance": 0.02,
-    "unit_type": "quote",
-    "enable_symbol_pool": true,
-    "default_symbols": ["BTC-USDT-SWAP", "ETH-USDT-SWAP"]
+    "price_change_threshold": 1.5,
+    "volume_ratio_threshold": 2.5,
+    "position_change_threshold": 2.0
+  },
+  "position_manager": {
+    "max_positions": 5,
+    "position_size_percent": 10,
+    "take_profit_percent": 3.0,
+    "stop_loss_percent": 2.0
+  },
+  "http_server": {
+    "enabled": true,
+    "host": "0.0.0.0",
+    "port": 8080
   }
 }
 ```
 
-### 配置加载
+## HTTP API接口
 
-系统使用 `config_loader.py` 模块加载配置，它会自动合并通用API配置和应用特定配置：
+系统提供以下标准HTTP API接口:
 
-```python
-from src.common.config_loader import get_app_config
+### 通用端点
 
-# 加载应用配置（自动合并API配置）
-config = get_app_config("tradingview_signal_tracker")
+- **GET `/api/status`**: 获取策略状态
+  ```
+  curl http://localhost:8080/api/status
+  ```
+
+- **POST `/api/trigger`**: 触发信号处理
+  ```
+  curl -X POST http://localhost:8080/api/trigger -H "Content-Type: application/json" -d '{"action":"scan"}'
+  ```
+
+- **POST `/api/close_all`**: 关闭所有持仓
+  ```
+  curl -X POST http://localhost:8080/api/close_all
+  ```
+
+### 短线逐利策略专用端点
+
+- **GET `/api/factor_analysis`**: 分析策略因子
+  ```
+  curl http://localhost:8080/api/factor_analysis
+  ```
+
+### 因子分析工具
+
+使用以下命令运行因子分析:
+
+   ```bash
+python scripts/analyze_factors.py --host <IP地址> --port 8080 --max-symbols 50
 ```
 
-## 新增应用程序开发指南
+支持参数:
+- `--host`: 服务器主机名或IP (默认: localhost)
+- `--port`: 服务器端口 (默认: 8080)
+- `--top`: 返回排名前多少的数据 (默认: 10)
+- `--max-symbols`: 最多分析多少个标的 (默认: 20)
+- `--format`: 输出格式 (默认: table, 可选: json)
 
-要开发一个新的交易应用程序，你可以按照以下步骤操作：
+## 开发指南
 
-1. **复制策略模板**
-   ```bash
-   cp -r apps/strategy_template apps/my_new_strategy
-   ```
+### 系统架构
+
+CryptoQuant采用分层架构设计:
+
+1. **核心层**: 提供基础组件和服务
+   - 交易框架、仓位管理、数据缓存等
+
+2. **应用层**: 实现具体的交易策略和功能
+   - 短线逐利策略、信号追踪器等
+
+3. **服务层**: 提供API和用户界面
+   - HTTP服务器、WebSocket服务等
+
+4. **交易所接口层**: 与交易所API交互
+   - 目前主要支持OKEx交易所
+
+### 创建新策略
+
+1. 复制`apps/strategy_template`目录作为起点
+2. 实现自定义的信号处理逻辑
+3. 在`config`目录下创建相应的配置文件
+4. 运行新策略的`main.py`文件
+
+### 开发规范
+
+- 使用异步编程模式 (asyncio)
+- 遵循PEP 8命名和代码风格
+- 为所有公共API添加文档字符串
+- 使用类型注解提高代码可读性和安全性
+- 使用日志记录关键操作和异常
+
+## 性能优化
+
+- 数据缓存: 减少API调用，提高响应速度
+- 异步处理: 非阻塞I/O操作
+- 延迟启动: 分散多个组件的启动时间
+- 内存优化: 定期清理不再需要的缓存数据
+- 批量操作: 尽可能合并API请求
+
+## 贡献与许可
+
+欢迎提交问题报告、功能请求和Pull Requests。
+
+**贡献指南:**
+1. Fork项目
+2. 创建特性分支 (`git checkout -b feature/amazing-feature`)
+3. 提交更改 (`git commit -m 'Add some amazing feature'`)
+4. 推送到分支 (`git push origin feature/amazing-feature`)
+5. 创建Pull Request
+
+本项目采用MIT许可证。

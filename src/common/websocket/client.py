@@ -18,6 +18,8 @@ class ExchangeWebSocketClient:
         self._message_processor = None
         # 跟踪已订阅的频道
         self._subscribed_channels: List[Dict[str, Any]] = []
+        # 跟踪待订阅的频道
+        self._pending_subscriptions: List[Dict[str, Any]] = []
         # 最后一次活动时间
         self.last_activity_time = time.time()
         # 心跳超时时间（秒）
@@ -43,7 +45,11 @@ class ExchangeWebSocketClient:
             channels: 频道列表，格式由具体交易所决定
         """
         if not self.connection:
-            self.logger.warning("尚未建立连接，无法订阅")
+            self.logger.warning("尚未建立连接，将频道添加到待订阅列表")
+            # 将频道添加到待订阅列表
+            for channel in channels:
+                if channel not in self._pending_subscriptions:
+                    self._pending_subscriptions.append(channel)
             return
             
         # 默认实现，子类可以覆盖
@@ -103,12 +109,28 @@ class ExchangeWebSocketClient:
 
     async def _resubscribe_all_channels(self):
         """重新订阅所有之前订阅的频道"""
-        if not self._subscribed_channels:
+        channels_to_subscribe = []
+        
+        # 添加已订阅的频道
+        if self._subscribed_channels:
+            channels_to_subscribe.extend(self._subscribed_channels)
+            self.logger.info(f"准备重新订阅 {len(self._subscribed_channels)} 个已订阅频道")
+        
+        # 添加待订阅的频道
+        if self._pending_subscriptions:
+            for channel in self._pending_subscriptions:
+                if channel not in channels_to_subscribe:
+                    channels_to_subscribe.append(channel)
+            self.logger.info(f"准备订阅 {len(self._pending_subscriptions)} 个待订阅频道")
+            # 清空待订阅列表
+            self._pending_subscriptions = []
+            
+        if not channels_to_subscribe:
             self.logger.info("没有需要重新订阅的频道")
             return
             
-        self.logger.info(f"重新订阅 {len(self._subscribed_channels)} 个频道")
-        await self.subscribe(self._subscribed_channels)
+        self.logger.info(f"共订阅 {len(channels_to_subscribe)} 个频道")
+        await self.subscribe(channels_to_subscribe)
         self.last_resubscribe_time = time.time()
 
     async def _listen(self):
@@ -119,10 +141,10 @@ class ExchangeWebSocketClient:
         
         try:
             # 启动心跳检查任务
-            heartbeat_task = asyncio.create_task(self._check_heartbeat())
+            heartbeat_task = asyncio.ensure_future(self._check_heartbeat())
             
             # 启动定期重新订阅任务
-            resubscribe_task = asyncio.create_task(self._periodic_resubscribe())
+            resubscribe_task = asyncio.ensure_future(self._periodic_resubscribe())
             
             async for message in self.connection:
                 try:

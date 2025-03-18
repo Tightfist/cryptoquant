@@ -154,6 +154,22 @@ class OKExDataCache(DataCache):
         # 合约面值缓存
         self._contract_size_cache = {}
         
+        # 持仓量滑动缓存，格式: {inst_id: {'data': [时间戳升序排列的持仓量记录], 'last_update': timestamp}}
+        self._oi_sliding_cache = {}
+        
+        # 持仓量缓存最大容量(每个交易对)
+        self._oi_cache_max_size = 1000
+        
+        # 持仓量自动清理阈值
+        self._oi_clean_threshold = 800
+        
+        # 持仓量数据统计
+        self._oi_stats = {
+            'total_updates': 0,
+            'invalid_data_count': 0,
+            'last_stat_time': time.time()
+        }
+        
     def configure(self, config: Dict[str, Any]):
         """
         配置OKEx数据缓存
@@ -201,6 +217,11 @@ class OKExDataCache(DataCache):
                 self.logger.warning(f"API配置不完整，缺少以下键: {missing_keys}，将使用默认配置加载机制")
         else:
             self.logger.warning("未找到exchange配置，将使用默认配置加载机制")
+        
+        # 持仓量缓存配置
+        cache_config = config.get('cache', {})
+        self._oi_cache_max_size = cache_config.get('oi_cache_max_size', 1000)
+        self._oi_clean_threshold = cache_config.get('oi_clean_threshold', 800)
         
     def _init_trader(self):
         """初始化交易对象用于API调用"""
@@ -427,7 +448,7 @@ class OKExDataCache(DataCache):
             return result
         
         # 备用方案2: 尝试不同的时间周期
-        if timeframe != "15m" and timeframe != "1h":
+        if timeframe != "15m" and timeframe != "1H":
             self.logger.warning(f"尝试使用不同时间周期获取数据: {inst_id}, 从 {timeframe} 切换到 15m")
             try:
                 # 尝试使用15分钟周期获取数据
@@ -452,7 +473,7 @@ class OKExDataCache(DataCache):
                 self.logger.error(f"尝试获取较少数据失败: {e}")
         
         # 备用方案4: 对于1小时数据尝试获取15分钟数据并合并（新增加）
-        if timeframe == "1h":
+        if timeframe == "1H":
             self.logger.warning(f"尝试通过15分钟数据构造1小时数据: {inst_id}")
             try:
                 # 尝试获取更多的15分钟数据
@@ -488,24 +509,8 @@ class OKExDataCache(DataCache):
         
     async def get_open_interest(self, inst_id: str, timeframe: str = "5m", limit: int = 100) -> Dict:
         """
-        获取持仓量数据，先检查缓存，如果没有或者缓存过期则从API获取
-        
-        Args:
-            inst_id: 交易对ID
-            timeframe: 时间周期，如 "5m"
-            limit: 返回的数据数量
-            
-        Returns:
-            Dict: 包含持仓量数据和元信息的字典，格式为
-                {
-                    "data": [...],  # 持仓量数据列表
-                    "is_fallback": bool,  # 是否为降级数据
-                    "fallback_type": str,  # 降级类型，如 "expired_cache", "current_data_only", "reduced_data"
-                    "original_request": {"inst_id": str, "timeframe": str, "limit": int}  # 原始请求参数
-                }
+        获取持仓量数据，整合了历史API和滑动缓存
         """
-        cache_key = f"open_interest:{inst_id}:{timeframe}:{limit}"
-        
         # 准备返回结果结构
         result = {
             "data": [],
@@ -513,6 +518,9 @@ class OKExDataCache(DataCache):
             "fallback_type": None,
             "original_request": {"inst_id": inst_id, "timeframe": timeframe, "limit": limit}
         }
+        
+        # 首先尝试从缓存获取数据
+        cache_key = f"open_interest:{inst_id}:{timeframe}:{limit}"
         
         # 检查缓存是否存在且是否过期 (5分钟有效期)
         current_time = time.time()
@@ -563,6 +571,34 @@ class OKExDataCache(DataCache):
                         self._last_refresh[cache_key] = current_time
                         
                         result["data"] = open_interest
+                        
+                        # 如果API获取成功，现在尝试从滑动缓存获取补充数据
+                        if len(open_interest) < limit:
+                            # 尝试从滑动缓存获取补充数据
+                            cache_result = await self.get_open_interest_from_cache(inst_id, timeframe, limit)
+                            
+                            if cache_result["data"]:
+                                # 合并API数据和缓存数据
+                                merged_data = result["data"].copy()
+                                api_timestamps = {int(record['ts']) for record in merged_data}
+                                
+                                for cache_record in cache_result["data"]:
+                                    cache_ts = int(cache_record['ts'])
+                                    if cache_ts not in api_timestamps:
+                                        merged_data.append(cache_record)
+                                
+                                # 按时间戳排序
+                                merged_data.sort(key=lambda x: int(x['ts']))
+                                
+                                # 限制返回数量
+                                merged_data = merged_data[-limit:] if len(merged_data) > limit else merged_data
+                                
+                                result["data"] = merged_data
+                                result["is_fallback"] = True
+                                result["fallback_type"] = "api_cache_merged"
+                                
+                                self.logger.info(f"合并API和缓存数据: {inst_id}, {timeframe}, 总计 {len(merged_data)} 条")
+                        
                         return result
                     else:
                         self.logger.warning(f"API返回的持仓量数据无效或为空: {inst_id}, 重试 {retry+1}/{max_retries}, 数据={open_interest}")
@@ -579,6 +615,12 @@ class OKExDataCache(DataCache):
             if retry < max_retries - 1:
                 await asyncio.sleep(retry_delay)
                 retry_delay *= 2  # 指数退避
+        
+        # 尝试仅从滑动缓存获取数据
+        cache_result = await self.get_open_interest_from_cache(inst_id, timeframe, limit)
+        if cache_result["data"]:
+            self.logger.info(f"API获取失败，使用滑动缓存数据: {inst_id}, {timeframe}")
+            return cache_result
         
         # 所有重试都失败，尝试备用方案
         
@@ -626,28 +668,254 @@ class OKExDataCache(DataCache):
         # 如果所有备用方案都失败，返回空结果
         self.logger.error(f"所有获取持仓量数据的尝试都失败: {inst_id}, {timeframe}, {limit}")
         return result
-
+    
     async def update_open_interest(self, inst_id: str, timeframe: str, open_interest: List):
         """
-        更新持仓量数据缓存
+        更新持仓量缓存数据
         
         Args:
             inst_id: 交易对ID
             timeframe: 时间周期
             open_interest: 持仓量数据
         """
-        for limit in [10, 50, 100]:  # 常用的limit值
-            cache_key = f"open_interest:{inst_id}:{timeframe}:{limit}"
+        # 在现有方法基础上增加对滑动缓存的支持
+        cache_key = f"open_interest:{inst_id}:{timeframe}"
+        
+        # 更新常规缓存
+        if cache_key not in self._data:
+            self._data[cache_key] = {}
+        
+        self._data[cache_key]["data"] = open_interest
+        self._last_refresh[cache_key] = time.time()
+    
+    async def update_open_interest_realtime(self, inst_id: str, data: Dict[str, Any]):
+        """
+        更新实时持仓量滑动缓存
+        
+        Args:
+            inst_id: 交易对ID
+            data: 持仓量数据，格式如 {'ts': '1634841600000', 'oi': '12345.67', ...}
+        """
+        if not inst_id or not data:
+            return
             
-            if cache_key in self._data:
-                # 更新现有数据
-                if len(open_interest) >= limit:
-                    self._data[cache_key]["data"] = open_interest[-limit:]
-                else:
-                    self._data[cache_key]["data"] = open_interest
+        # 更新全局统计
+        self._oi_stats['total_updates'] += 1
+            
+        # 确保缓存存在
+        if inst_id not in self._oi_sliding_cache:
+            self._oi_sliding_cache[inst_id] = {
+                'data': [],
+                'last_update': time.time(),
+                'updates': 0,
+                'invalid_count': 0,
+                'duplicates': 0
+            }
+        
+        cache_info = self._oi_sliding_cache[inst_id]
+        
+        # 提取时间戳和持仓量数据
+        try:
+            ts = int(data.get('ts', int(time.time() * 1000)))
+            oi = data.get('oi')
+            
+            if not oi:
+                cache_info['invalid_count'] += 1
+                self._oi_stats['invalid_data_count'] += 1
+                if cache_info['invalid_count'] % 10 == 0:  # 每10次记录一次警告
+                    self.logger.warning(f"收到无效的持仓量数据: {inst_id}, 无效计数={cache_info['invalid_count']}, 数据={data}")
+                return
+            
+            # 创建持仓量记录
+            oi_record = {
+                'ts': str(ts),
+                'oi': str(oi),
+                'oiCcy': data.get('oiCcy', ''),
+                'instType': data.get('instType', 'SWAP'),
+                'instId': inst_id
+            }
+            
+            # 将记录添加到滑动缓存
+            cache_data = cache_info['data']
+            
+            # 检查是否有重复记录，避免添加相同时间戳的数据
+            is_duplicate = False
+            for i, record in enumerate(cache_data):
+                if int(record['ts']) == ts:
+                    # 更新现有记录
+                    cache_data[i] = oi_record
+                    cache_info['last_update'] = time.time()
+                    cache_info['duplicates'] += 1
+                    is_duplicate = True
+                    break
+            
+            # 如果不是重复记录，添加新记录
+            if not is_duplicate:
+                cache_data.append(oi_record)
+                cache_info['updates'] += 1
                 
+                # 每100次更新打印统计信息
+                if cache_info['updates'] % 100 == 0:
+                    self.logger.info(f"持仓量缓存更新: {inst_id}, 记录数={len(cache_data)}, " +
+                                     f"总更新={cache_info['updates']}, " +
+                                     f"重复={cache_info['duplicates']}, " +
+                                     f"无效={cache_info['invalid_count']}")
+                
+                # 按时间戳排序
+                cache_data.sort(key=lambda x: int(x['ts']))
+                
+                # 更新最后更新时间
+                cache_info['last_update'] = time.time()
+            
+            # 清理缓存，避免无限增长
+            if len(cache_data) > self._oi_clean_threshold:
+                old_len = len(cache_data)
+                # 保留最新的数据
+                cache_info['data'] = cache_data[-self._oi_cache_max_size:]
+                self.logger.debug(f"清理持仓量滑动缓存: {inst_id}, 从 {old_len} 条减少到 {len(cache_info['data'])} 条")
+                
+            # 每分钟打印一次全局统计
+            current_time = time.time()
+            if current_time - self._oi_stats['last_stat_time'] > 60:
+                self.logger.info(f"持仓量数据全局统计: 总更新={self._oi_stats['total_updates']}, " +
+                                f"无效数据={self._oi_stats['invalid_data_count']}, " +
+                                f"缓存币种数={len(self._oi_sliding_cache)}")
+                self._oi_stats['last_stat_time'] = current_time
+                
+            # 更新5分钟周期的常规缓存，供策略直接访问
+            self._update_5m_oi_cache(inst_id, oi_record)
+            
+        except Exception as e:
+            self.logger.error(f"更新持仓量滑动缓存异常: {inst_id}, {e}", exc_info=True)
+    
+    def _update_5m_oi_cache(self, inst_id: str, oi_record: Dict[str, Any]):
+        """
+        更新5分钟周期的持仓量缓存，用于策略直接访问
+        
+        Args:
+            inst_id: 交易对ID
+            oi_record: 持仓量记录
+        """
+        try:
+            # 为5m持仓量缓存直接更新
+            cache_key = f"open_interest:{inst_id}:5m"
+            
+            # 初始化缓存
+            if cache_key not in self._data:
+                self._data[cache_key] = {"data": []}
+                
+            cache_data = self._data[cache_key]["data"]
+            current_ts = int(oi_record['ts'])
+            
+            # 检查是否需要添加新记录
+            if not cache_data:
+                # 缓存为空，直接添加
+                cache_data.append(oi_record)
                 self._last_refresh[cache_key] = time.time()
-                self.logger.debug(f"更新持仓量缓存: {cache_key}")
+                return
+                
+            # 获取最后一条记录的时间戳
+            last_ts = int(cache_data[-1]['ts'])
+            
+            # 如果时间差超过5分钟，添加新记录
+            # 否则，更新最后一条记录
+            if current_ts - last_ts >= 300000:  # 5分钟 = 300000毫秒
+                cache_data.append(oi_record)
+                
+                # 限制缓存大小
+                if len(cache_data) > 100:  # 保留100条记录
+                    self._data[cache_key]["data"] = cache_data[-100:]
+            else:
+                # 更新最后一条记录
+                cache_data[-1] = oi_record
+                
+            # 更新刷新时间
+            self._last_refresh[cache_key] = time.time()
+            
+        except Exception as e:
+            self.logger.error(f"更新5分钟持仓量缓存异常: {inst_id}, {e}")
+    
+    async def get_open_interest_from_cache(self, inst_id: str, timeframe: str = "5m", limit: int = 100) -> Dict:
+        """
+        从滑动缓存获取持仓量数据，用于替代或补充历史API数据
+        
+        Args:
+            inst_id: 交易对ID
+            timeframe: 时间周期，如 "5m"
+            limit: 返回的数据数量
+            
+        Returns:
+            Dict: 包含持仓量数据和元信息的字典
+        """
+        result = {
+            "data": [],
+            "is_fallback": False,
+            "fallback_type": None,
+            "original_request": {"inst_id": inst_id, "timeframe": timeframe, "limit": limit}
+        }
+        
+        # 检查是否有缓存数据
+        if inst_id not in self._oi_sliding_cache or not self._oi_sliding_cache[inst_id]['data']:
+            self.logger.debug(f"滑动缓存中没有持仓量数据: {inst_id}")
+            return result
+        
+        # 获取缓存数据
+        cache_data = self._oi_sliding_cache[inst_id]['data']
+        
+        # 根据timeframe和limit选择合适的数据
+        # 这里需要根据timeframe进行采样，例如5m对应每5分钟取一个点
+        
+        # 解析timeframe
+        interval_unit = timeframe[-1].lower()  # 如 "m", "h", "d"
+        interval_value = int(timeframe[:-1])   # 如 "5m" => 5
+        
+        # 转换为毫秒
+        interval_ms = 0
+        if interval_unit == 'm':
+            interval_ms = interval_value * 60 * 1000
+        elif interval_unit == 'h':
+            interval_ms = interval_value * 60 * 60 * 1000
+        elif interval_unit == 'd':
+            interval_ms = interval_value * 24 * 60 * 60 * 1000
+        else:
+            self.logger.warning(f"不支持的时间周期单位: {interval_unit}")
+            return result
+        
+        # 获取当前时间戳（毫秒）
+        current_ts = int(time.time() * 1000)
+        
+        # 计算起始时间戳
+        start_ts = current_ts - (interval_ms * limit)
+        
+        # 对缓存数据进行采样
+        sampled_data = []
+        last_sample_ts = 0
+        
+        # 找出时间范围内的所有记录
+        filtered_cache = [record for record in cache_data if int(record['ts']) >= start_ts]
+        
+        # 执行时间间隔采样
+        for record in filtered_cache:
+            record_ts = int(record['ts'])
+            
+            # 如果与上一个采样点的时间差足够大，则添加到结果中
+            if record_ts - last_sample_ts >= interval_ms or not sampled_data:
+                sampled_data.append(record)
+                last_sample_ts = record_ts
+        
+        # 限制返回数量
+        sampled_data = sampled_data[-limit:] if len(sampled_data) > limit else sampled_data
+        
+        # 设置结果
+        result["data"] = sampled_data
+        
+        # 如果数据不足，标记为降级数据
+        if len(sampled_data) < limit:
+            result["is_fallback"] = True
+            result["fallback_type"] = "insufficient_cache_data"
+        
+        self.logger.debug(f"从滑动缓存获取持仓量数据: {inst_id}, {timeframe}, 获取 {len(sampled_data)}/{limit} 条")
+        return result
     
     async def get_tickers(self, inst_type: str = "SWAP") -> Dict:
         """
