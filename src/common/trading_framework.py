@@ -709,18 +709,37 @@ class BaseStrategy(ABC):
                             await asyncio.sleep(1)
                     
                     # 获取当前价格
+                    mark_price = 0.0
+                    
                     try:
                         # 尝试使用OKExDataCache的get_mark_price方法
+                        self.logger.debug(f"正在获取 {symbol} 的标记价格")
                         mark_price = await self.data_cache.get_mark_price(symbol)
                     except AttributeError:
                         # 如果不是OKExDataCache，使用通用方法获取价格
                         self.logger.debug(f"使用通用方法获取{symbol}价格")
                         mark_price_data = await self.data_cache.get("mark-price", symbol)
-                        mark_price = float(mark_price_data.get('markPx', 0.0))
+                        if mark_price_data:
+                            mark_price = float(mark_price_data.get('markPx', 0.0))
+                        else:
+                            self.logger.warning(f"缓存中无{symbol}标记价格数据")
                     
                     if not mark_price:
-                        self.logger.warning(f"无法获取 {symbol} 的行情价格")
-                        continue
+                        # 如果获取价格失败，尝试从REST API获取
+                        self.logger.warning(f"无法从WebSocket缓存获取 {symbol} 的行情价格，尝试从REST API获取")
+                        try:
+                            # 尝试从交易API直接获取价格
+                            mark_price = self.trader.get_mark_price(symbol)
+                            if mark_price > 0:
+                                self.logger.info(f"成功从REST API获取 {symbol} 的标记价格: {mark_price}")
+                            else:
+                                self.logger.error(f"从REST API获取 {symbol} 价格失败: 价格为0或无效")
+                        except Exception as api_e:
+                            self.logger.error(f"从REST API获取 {symbol} 价格异常: {api_e}")
+                            
+                        if not mark_price:
+                            self.logger.error(f"无法获取 {symbol} 的行情价格，跳过本次监控")
+                            continue
                     
                     # 计算盈亏百分比
                     direction = "long" if position.quantity > 0 else "short"
@@ -1034,61 +1053,55 @@ class BaseStrategy(ABC):
             # 计算带杠杆的盈亏百分比
             leveraged_pnl_pct = pnl_pct * position.leverage
             
-            # 获取合约面值 - 使用同步方法
+            # 获取合约面值
             contract_size = self.get_contract_size_sync(symbol)
             
-            # 计算合约价值和保证金
+            # 计算盈亏金额
+            # 合约价值 = 数量 * 入场价格 * 合约面值
             contract_value = abs(position.quantity) * position.entry_price * contract_size
+            
+            # 保证金 = 合约价值 / 杠杆倍数
             margin = contract_value / position.leverage
             
-            # 计算实际盈亏金额
+            # 实际盈亏金额（考虑杠杆）- 实际上是保证金 * 杠杆后的收益率
             pnl_amount = margin * leveraged_pnl_pct
             
-            # 更新仓位状态 - 不删除记录，而是标记为已关闭并记录收益信息
-            current_timestamp = int(time.time() * 1000)  # 使用毫秒级时间戳
+            # 更新持仓信息
+            self.logger.info(f"平仓成功 {symbol} {direction} @ {mark_price}, PnL: {pnl_amount:.2f} USDT ({leveraged_pnl_pct*100:.2f}%)")
             
-            # 确保入场时间戳是毫秒级的
-            entry_timestamp = position.timestamp
-            if entry_timestamp < 9999999999:  # 秒级时间戳
-                entry_timestamp *= 1000
-                
-            # 计算持仓时间用于日志
-            holding_time_ms = current_timestamp - entry_timestamp
-            holding_time_hours = holding_time_ms / (1000 * 60 * 60)
+            # 从缓存中移除仓位
+            try:
+                if symbol in self.positions:
+                    del self.positions[symbol]
+                    self.logger.info(f"仓位已从内存中移除: {symbol}")
+                    
+                    # 从价格记录中移除
+                    if symbol in self._price_high_low:
+                        del self._price_high_low[symbol]
+                        self.logger.info(f"价格记录已从内存中移除: {symbol}")
+            except Exception as e:
+                self.logger.exception(f"移除内存仓位异常: {e}")
             
-            self.position_mgr.close_position(
-                symbol, 
-                mark_price if mark_price else 0,
-                current_timestamp,
-                pnl_amount,
-                pnl_pct
-            )
+            # 更新数据库 - 标记为已平仓
+            try:
+                exit_timestamp = int(time.time() * 1000)
+                # 传递position_id，确保关闭正确的仓位
+                self.position_mgr.close_position(
+                    symbol=symbol,
+                    exit_price=mark_price,
+                    exit_timestamp=exit_timestamp,
+                    pnl_amount=pnl_amount,
+                    pnl_percentage=leveraged_pnl_pct,
+                    position_id=position.position_id
+                )
+                self.logger.info(f"仓位已在数据库中标记为已平仓: {symbol}, position_id: {position.position_id}")
+            except Exception as e:
+                self.logger.exception(f"更新数据库仓位状态异常: {e}")
             
-            # 从内存中删除仓位
-            if symbol in self.positions:
-                del self.positions[symbol]
-                
-            # 清理价格记录
-            if symbol in self._price_high_low:
-                del self._price_high_low[symbol]
-            
-            # 记录详细的平仓信息
-            self.logger.info(f"自动平仓成功 {symbol} @ {mark_price}", extra={
-                "symbol": symbol,
-                "direction": direction,
-                "entry_price": position.entry_price,
-                "exit_price": mark_price,
-                "quantity": abs(position.quantity),
-                "leverage": position.leverage,
-                "pnl_pct": pnl_pct * 100,
-                "leveraged_pnl_pct": leveraged_pnl_pct * 100,
-                "pnl_amount": pnl_amount,
-                "margin": margin,
-                "entry_time": position.timestamp,
-                "exit_time": current_timestamp
-            })
+            return True, f"平仓成功: {symbol} @ {mark_price}, PnL: {pnl_amount:.2f} USDT"
         except Exception as e:
-            self.logger.exception(f"执行平仓异常 {symbol}: {e}")
+            self.logger.exception(f"平仓异常: {e}")
+            return False, f"平仓异常: {e}"
     
     def get_position_summary(self) -> Dict[str, Any]:
         """获取持仓摘要信息"""

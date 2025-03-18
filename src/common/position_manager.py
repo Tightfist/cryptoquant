@@ -75,6 +75,52 @@ class PositionManager:
             else:
                 # 表已存在，检查并升级表结构
                 try:
+                    # 检查主键是否是symbol
+                    cursor = self.conn.execute('PRAGMA table_info(positions)')
+                    columns = cursor.fetchall()
+                    primary_key_column = None
+                    for col in columns:
+                        if col[5] == 1:  # 第6列表示是否为主键
+                            primary_key_column = col[1]  # 第2列是列名
+                            break
+                    
+                    # 如果主键是symbol，则需要重建表
+                    if primary_key_column == 'symbol':
+                        self.logger.info("检测到数据库主键需要从symbol改为position_id，开始迁移数据...")
+                        
+                        # 备份旧表
+                        self.conn.execute('ALTER TABLE positions RENAME TO positions_old')
+                        
+                        # 创建新表
+                        self.conn.execute('''CREATE TABLE positions
+                            (symbol TEXT,
+                             position_id TEXT PRIMARY KEY,
+                             entry_price REAL,
+                             quantity REAL,
+                             position_type TEXT,
+                             leverage INTEGER,
+                             timestamp INTEGER,
+                             closed INTEGER,
+                             exit_price REAL,
+                             exit_timestamp INTEGER,
+                             pnl_amount REAL,
+                             pnl_percentage REAL)''')
+                        
+                        # 复制数据
+                        self.conn.execute('''INSERT INTO positions 
+                            SELECT * FROM positions_old''')
+                        
+                        # 创建索引
+                        self.conn.execute('''CREATE INDEX idx_positions_symbol ON positions(symbol)''')
+                        self.conn.execute('''CREATE INDEX idx_positions_closed ON positions(closed)''')
+                        self.conn.execute('''CREATE INDEX idx_positions_timestamp ON positions(timestamp)''')
+                        self.conn.execute('''CREATE INDEX idx_positions_exit_timestamp ON positions(exit_timestamp)''')
+                        
+                        # 删除旧表
+                        self.conn.execute('DROP TABLE positions_old')
+                        
+                        self.logger.info("数据库迁移完成")
+                    
                     # 检查是否有新增的列
                     cursor = self.conn.execute('PRAGMA table_info(positions)')
                     columns = [row[1] for row in cursor.fetchall()]
@@ -142,15 +188,35 @@ class PositionManager:
                  position.exit_timestamp, position.pnl_amount, position.pnl_percentage))
             self.conn.commit()
     
-    def close_position(self, symbol: str, exit_price: float, exit_timestamp: int = None, pnl_amount: float = 0.0, pnl_percentage: float = 0.0):
-        """标记仓位为已平仓，并记录平仓信息"""
+    def close_position(self, symbol: str, exit_price: float, exit_timestamp: int = None, pnl_amount: float = 0.0, pnl_percentage: float = 0.0, position_id: str = None):
+        """
+        标记仓位为已平仓，并记录平仓信息
+        
+        Args:
+            symbol: 交易对
+            exit_price: 平仓价格
+            exit_timestamp: 平仓时间戳，如果不提供则使用当前时间
+            pnl_amount: 盈亏金额
+            pnl_percentage: 盈亏百分比
+            position_id: 仓位ID，如果提供则根据position_id关闭仓位，否则根据symbol关闭所有未平仓的仓位
+        """
         if exit_timestamp is None:
             exit_timestamp = int(time.time() * 1000)
             
         with self.db_lock:
-            self.conn.execute(
-                "UPDATE positions SET closed=1, exit_price=?, exit_timestamp=?, pnl_amount=?, pnl_percentage=? WHERE symbol=? AND closed=0",
-                (exit_price, exit_timestamp, pnl_amount, pnl_percentage, symbol))
+            if position_id:
+                # 根据position_id关闭特定仓位
+                self.logger.info(f"根据position_id关闭仓位: {position_id}, 价格: {exit_price}, 盈亏: {pnl_amount}")
+                self.conn.execute(
+                    "UPDATE positions SET closed=1, exit_price=?, exit_timestamp=?, pnl_amount=?, pnl_percentage=? WHERE position_id=? AND closed=0",
+                    (exit_price, exit_timestamp, pnl_amount, pnl_percentage, position_id))
+            else:
+                # 根据symbol关闭所有未平仓的仓位
+                self.logger.info(f"根据symbol关闭仓位: {symbol}, 价格: {exit_price}, 盈亏: {pnl_amount}")
+                self.conn.execute(
+                    "UPDATE positions SET closed=1, exit_price=?, exit_timestamp=?, pnl_amount=?, pnl_percentage=? WHERE symbol=? AND closed=0",
+                    (exit_price, exit_timestamp, pnl_amount, pnl_percentage, symbol))
+            
             self.conn.commit()
     
     def get_daily_pnl(self, start_date: str = None, end_date: str = None) -> List[Dict]:

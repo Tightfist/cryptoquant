@@ -12,7 +12,7 @@
   },
   "strategy": {
     "leverage": 18,
-    "per_position_usdt": 30,
+    "per_position_usdt": 100,
     "take_profit_pct": 0.055,
     "stop_loss_pct": 0.0185,
     "trailing_stop": true,

@@ -86,6 +86,12 @@ class DataCache:
             inst_id = data.get('instId')
             if inst_id:
                 self._data[channel][inst_id] = data
+                
+                # 更新缓存时间
+                if channel not in self._cache_update_time:
+                    self._cache_update_time[channel] = {}
+                self._cache_update_time[channel][inst_id] = time.time()
+                
                 self.logger.debug(f"已更新 {channel}/{inst_id} 数据")
 
     async def get(self, channel: str, inst_id: str) -> dict:
@@ -138,6 +144,12 @@ class OKExDataCache(DataCache):
         
         # 缓存刷新时间记录
         self._last_refresh = {}
+        
+        # 缓存数据的最后更新时间
+        self._cache_update_time = {}
+        
+        # 缓存过期时间（秒）
+        self.cache_expiry_time = 60  # 1分钟
         
         # 合约面值缓存
         self._contract_size_cache = {}
@@ -248,50 +260,59 @@ class OKExDataCache(DataCache):
         Returns:
             float: 标记价格
         """
-        # 先尝试从缓存获取
-        data = await self.get("mark-price", inst_id)
-        cache_price = float(data.get('markPx', 0.0))
-        
-        # 如果缓存价格可用，直接返回
-        if cache_price > 0:
-            self.logger.debug(f"使用缓存中的标记价格: {inst_id} = {cache_price}")
-            return cache_price
-        
-        # 缓存不可用，尝试从API获取
-        self.logger.info(f"缓存中无法获取 {inst_id} 价格，尝试直接从API获取")
-        
         try:
-            # 确保trader已初始化
-            if self._direct_trader is None:
-                self._init_trader()
-                
-            if self._direct_trader is None:
-                self.logger.error("无法初始化API调用器，无法获取价格")
-                return 0.0
-                
-            # 直接调用API获取价格
-            api_price = self._direct_trader.get_mark_price(inst_id)
+            # 首先尝试从缓存获取
+            mark_price_data = await self.get("mark-price", inst_id)
+            current_time = time.time()
             
-            if api_price > 0:
-                self.logger.info(f"通过API获取到 {inst_id} 价格: {api_price}")
+            # 检查缓存是否存在且未过期
+            cache_valid = (
+                mark_price_data and 
+                'mark-price' in self._cache_update_time and 
+                inst_id in self._cache_update_time['mark-price'] and 
+                (current_time - self._cache_update_time['mark-price'][inst_id]) < self.cache_expiry_time
+            )
+            
+            if cache_valid:
+                mark_price = float(mark_price_data.get('markPx', 0.0))
+                if mark_price > 0:
+                    return mark_price
+            
+            # 如果缓存无效或过期，直接从API获取
+            if not cache_valid:
+                self.logger.info(f"{inst_id} 标记价格缓存过期或无效，从API获取最新数据")
                 
-                # 将API获取的价格更新到缓存
-                # 创建一个符合缓存数据格式的对象
-                price_data = {
-                    'instId': inst_id,
-                    'markPx': str(api_price)
-                }
-                
-                # 异步更新缓存(避免阻塞当前调用)
-                asyncio.create_task(self.update("mark-price", price_data))
-                
-                return api_price
-            else:
-                self.logger.warning(f"API返回的价格无效: {api_price}")
-                return 0.0
-                
+                # 确保trader已初始化
+                if self._direct_trader is None:
+                    self._init_trader()
+                    
+                if self._direct_trader:
+                    # 从API获取最新价格
+                    mark_price = self._direct_trader.get_mark_price(inst_id)
+                    
+                    if mark_price > 0:
+                        # 更新缓存
+                        # 手动更新缓存
+                        async with self._lock:
+                            if 'mark-price' not in self._data:
+                                self._data['mark-price'] = {}
+                            
+                            self._data['mark-price'][inst_id] = {'instId': inst_id, 'markPx': str(mark_price)}
+                            
+                            # 更新缓存时间
+                            if 'mark-price' not in self._cache_update_time:
+                                self._cache_update_time['mark-price'] = {}
+                            self._cache_update_time['mark-price'][inst_id] = current_time
+                            
+                        self.logger.info(f"已从API更新 {inst_id} 标记价格: {mark_price}")
+                        return mark_price
+            
+            # 如果还是获取不到价格，记录警告并返回0
+            self.logger.warning(f"无法获取 {inst_id} 的标记价格，缓存和API均失败")
+            return 0.0
+            
         except Exception as e:
-            self.logger.error(f"从API获取 {inst_id} 价格异常: {e}")
+            self.logger.error(f"获取标记价格异常: {e}", exc_info=True)
             return 0.0
     
     async def get_funding_rate(self, inst_id: str) -> float:
