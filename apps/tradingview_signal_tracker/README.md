@@ -53,6 +53,28 @@
    }
    ```
 
+   ### 使用新版HTTP服务器配置（推荐）
+
+   新版配置支持HTTPS，更安全和灵活：
+
+   ```json
+   {
+     "app_name": "tradingview_signal_tracker",
+     "http_server": {                           // 新版HTTP服务器配置
+       "enabled": true,                         // 是否启用HTTP服务器
+       "host": "0.0.0.0",                       // 监听主机地址
+       "port": 443,                             // 监听端口（HTTPS通常使用443）
+       "base_path": "/webhook",                 // 基础路径
+       "ssl": {                                 // SSL配置
+         "enabled": true,                       // 是否启用SSL
+         "cert_file": "/path/to/certificate.crt", // SSL证书文件路径
+         "key_file": "/path/to/private.key"    // SSL私钥文件路径
+       }
+     },
+     // 其他配置...
+   }
+   ```
+
 ## 运行应用
 
 从项目根目录运行：
@@ -80,7 +102,9 @@ python apps/tradingview_signal_tracker/main.py
 
 1. 在 TradingView 中创建一个新的警报
 2. 在警报设置中，选择 "Webhook URL" 选项
-3. 输入你的服务器地址，例如：`http://your-server-ip:80/webhook`
+3. 输入你的服务器地址，例如：
+   - HTTP: `http://your-server-ip:80/webhook`
+   - HTTPS: `https://your-server-ip:443/webhook`
 4. 在 "消息" 字段中，输入 JSON 格式的信号
 
 ### 信号格式示例
@@ -144,9 +168,9 @@ python apps/tradingview_signal_tracker/main.py
 }
 ```
 
-## HTTP API接口
+## HTTP/HTTPS API接口
 
-应用程序提供了HTTP API接口，可以手动触发信号、平仓和查询状态。启动后会自动生成以下脚本，位于 `scripts` 目录下：
+应用程序提供了HTTP/HTTPS API接口，可以手动触发信号、平仓和查询状态。启动后会自动生成以下脚本，位于 `scripts` 目录下：
 
 - `get_status.sh` - 获取当前状态
 - `open_position.sh` - 开仓
@@ -265,3 +289,38 @@ python apps/tradingview_signal_tracker/main.py
 - 建议先在模拟盘上测试策略，确认无误后再在实盘上运行
 - 定期备份你的数据和配置文件
 - 不要将包含API密钥的配置文件提交到版本控制系统
+- 使用HTTPS可以提高安全性，特别是在公网环境下运行时
+- 如果使用HTTPS，请确保你的SSL证书和私钥正确配置，并定期更新
+
+## HTTPS配置说明
+
+使用HTTPS可以加密你的数据传输，提高安全性。要启用HTTPS，你需要：
+
+1. 获取SSL证书和私钥
+   - 可以使用免费的Let's Encrypt证书
+   - 也可以从商业证书提供商购买
+   - 或者生成自签名证书（不推荐用于生产环境）
+
+2. 在配置文件中启用SSL
+   ```json
+   "http_server": {
+     "enabled": true,
+     "port": 443,
+     "ssl": {
+       "enabled": true,
+       "cert_file": "/path/to/certificate.crt",
+       "key_file": "/path/to/private.key"
+     }
+   }
+   ```
+
+3. 更新TradingView警报设置
+   - 将webhook URL从`http://`更改为`https://`
+   - 确保端口号与配置文件中的端口号匹配
+
+### 生成自签名证书（测试用途）
+
+```bash
+# 生成私钥和自签名证书
+openssl req -x509 -newkey rsa:4096 -keyout private.key -out certificate.crt -days 365 -nodes
+```

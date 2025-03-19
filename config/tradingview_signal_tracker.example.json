@@ -3,13 +3,18 @@
   "logging": {
     "level": "DEBUG",
     "file": "tradingview_signal_tracker.log",
-    "output_targets": ["file"]
+    "output_targets": ["file", "console"]
   },
   "http_server": {
     "enabled": true,
     "host": "0.0.0.0",
     "port": 80,
-    "base_path": "/webhook"
+    "base_path": "/webhook",
+    "ssl": {
+      "enabled": false,
+      "cert_file": "/path/to/your/certificate.crt",
+      "key_file": "/path/to/your/private.key"
+    }
   },
   "strategy": {
     "leverage": 18,

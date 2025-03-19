@@ -12,6 +12,13 @@ from typing import List, Tuple, Callable, Awaitable, Dict, Any
 from aiohttp import web
 import aiohttp_cors
 
+class WebhookHandler:
+    """默认的Webhook处理器"""
+    async def handle(self, data, request):
+        """处理Webhook请求"""
+        logger = logging.getLogger("common.http.server")
+        logger.warning(f"默认WebhookHandler收到请求，但没有设置具体的处理器: {data}")
+        return {"status": "error", "message": "未设置具体的处理器"}
 
 class HttpServer:
     """HTTP服务器"""
@@ -24,6 +31,9 @@ class HttpServer:
         self.site = None
         self.app_initialized = False
         
+        # 使用通用日志
+        self.logger = logging.getLogger("common.http.server")
+        
         # 设置静态文件目录
         current_dir = os.path.dirname(os.path.abspath(__file__))
         self.static_dir = os.path.join(current_dir, "static")
@@ -34,7 +44,12 @@ class HttpServer:
         # 设置API处理器
         self.api_handler = None
         
-        # 注册路由
+        # 注册路由 - 修复路径
+        # 确保路径格式正确
+        if not self.path.startswith('/'):
+            self.path = f"/{self.path}"
+        
+        self.logger.warning(f"注册webhook路由: POST {self.path}")
         self.app.router.add_post(self.path, self._handle_webhook)
         self.app.router.add_get("/health", self._handle_health_check)
         
@@ -47,26 +62,53 @@ class HttpServer:
     async def _handle_webhook(self, request):
         """处理Webhook请求"""
         try:
+            # 添加详细日志
+            self.logger.warning(f"HttpServer._handle_webhook收到请求: {request.method} {request.url}")
+            self.logger.warning(f"请求头: {request.headers}")
+            
             # 获取请求内容类型
             content_type = request.headers.get('Content-Type', '')
             
             if 'application/json' in content_type:
                 # JSON格式
                 data = await request.json()
-                self.logger.debug(f"收到JSON Webhook: {data}")
+                self.logger.warning(f"收到JSON Webhook: {data}")
             else:
                 # 文本格式
                 text = await request.text()
-                self.logger.debug(f"收到文本Webhook: {text}")
+                self.logger.warning(f"收到文本Webhook: {text}")
                 try:
                     # 尝试解析为JSON
                     data = json.loads(text)
+                    self.logger.warning(f"成功解析为JSON: {data}")
                 except json.JSONDecodeError:
                     # 非JSON格式，作为文本处理
                     data = {"text": text}
+                    self.logger.warning(f"非JSON格式，作为文本处理: {data}")
             
             # 调用处理函数
-            result = await self.message_handler.handle(data, request)
+            self.logger.warning(f"准备调用message_handler: {self.message_handler}")
+            
+            # 检查message_handler类型，如果是函数则直接调用
+            if callable(self.message_handler):
+                try:
+                    # 尝试作为协程函数调用
+                    if asyncio.iscoroutinefunction(self.message_handler):
+                        result = await self.message_handler(data, request)
+                    else:
+                        # 尝试作为普通函数调用
+                        result = self.message_handler(data, request)
+                    self.logger.warning(f"message_handler处理结果: {result}")
+                except Exception as e:
+                    self.logger.exception(f"调用message_handler异常: {e}")
+                    return web.json_response(
+                        {"status": "error", "message": f"处理异常: {str(e)}"},
+                        status=500
+                    )
+            else:
+                # 否则尝试调用handle方法
+                result = await self.message_handler.handle(data, request)
+                self.logger.warning(f"message_handler.handle处理结果: {result}")
             
             # 返回处理结果
             if result is None:
@@ -114,6 +156,15 @@ class HttpServer:
         self.app.router.add_post('/webhook/api/trigger', self.api_handler.handle_api_trigger)
         self.app.router.add_post('/webhook/api/close_all', self.api_handler.handle_api_close_all)
 
+    async def _handle_positions_page(self, request):
+        """处理仓位页面请求"""
+        positions_page = os.path.join(self.static_dir, "positions.html")
+        if os.path.exists(positions_page):
+            return web.FileResponse(positions_page)
+        else:
+            self.logger.warning(f"仓位页面文件不存在: {positions_page}")
+            return web.Response(text="仓位页面文件不存在", status=404)
+
 def create_http_server(
     host: str,
     port: int,
@@ -138,7 +189,7 @@ def create_http_server(
     Returns:
         web.Application: web应用实例
     """
-    logger = logger or logging.getLogger("HTTPServer")
+    logger = logger or logging.getLogger("common.http.server")
     
     # 创建应用
     app = web.Application()
@@ -213,7 +264,7 @@ async def run_http_server(
         cors_origins: CORS允许的来源列表
         logger: 日志记录器
     """
-    logger = logger or logging.getLogger("HTTPServer")
+    logger = logger or logging.getLogger("common.http.server")
     
     app = create_http_server(host, port, routes, static_dir, static_path, cors_origins, logger)
     

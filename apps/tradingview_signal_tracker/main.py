@@ -30,6 +30,7 @@ from src.common.config_loader import get_app_config
 from src.common.trading_framework import TradingFramework, TradeSignal
 from src.common.http.api_handlers import TradingFrameworkApiHandler
 from src.common.scripts.generate_api_scripts import generate_api_scripts
+from src.common.http.server import HttpServer
 
 from apps.tradingview_signal_tracker.trading_view_strategy import TradingViewStrategy
 
@@ -189,6 +190,14 @@ class TradingViewSignalApp:
                     )
                 })
                 
+                # 添加一个直接的测试路由
+                async def test_handler(request):
+                    self.logger.warning(f"测试路由收到请求: {request.method} {request.url}")
+                    return web.json_response({"status": "ok", "message": "测试路由正常"})
+                
+                self.http_server.app.router.add_get("/test", test_handler)
+                self.http_server.app.router.add_post("/test", test_handler)
+                
                 # 为所有路由添加CORS支持
                 for route in list(self.http_server.app.router.routes()):
                     cors.add(route)
@@ -196,6 +205,11 @@ class TradingViewSignalApp:
                 # 启动HTTP服务器
                 await self.http_server.start()
                 self.logger.info(f"HTTP服务器启动完成 (传统模式)，访问地址: http://{self.host}:{self.port}")
+                
+                # 打印所有已注册的路由
+                self.logger.warning("已注册的路由:")
+                for route in list(self.http_server.app.router.routes()):
+                    self.logger.warning(f" - {route.method} {route.get_info()}")
             except Exception as e:
                 self.logger.exception(f"启动传统HTTP服务器异常: {e}")
         else:
@@ -245,6 +259,11 @@ class TradingViewSignalApp:
                 webhook_path = f"{self.base_path}" if self.base_path.endswith('/') else f"{self.base_path}/"
                 routes.append(('POST', webhook_path, handle_webhook))
                 
+                # 同时注册不带斜杠的路由
+                webhook_path_no_slash = self.base_path.rstrip('/')
+                routes.append(('POST', webhook_path_no_slash, handle_webhook))
+                self.logger.warning(f"同时注册两个webhook路径: POST {webhook_path} 和 POST {webhook_path_no_slash}")
+                
                 # 获取API路由
                 for route in api_handler.get_routes(self.base_path):
                     routes.append(route)
@@ -258,6 +277,15 @@ class TradingViewSignalApp:
                 
                 # 从module导入run_http_server
                 from src.common.http.server import run_http_server
+                
+                # 添加测试路由
+                async def test_handler(request):
+                    self.logger.warning(f"测试路由收到请求: {request.method} {request.url}")
+                    return web.json_response({"status": "ok", "message": "测试路由正常"})
+                
+                routes.append(('GET', '/test', test_handler))
+                routes.append(('POST', '/test', test_handler))
+                self.logger.warning("添加测试路由: GET/POST /test")
                 
                 # 启动HTTP服务器
                 self.http_task = asyncio.ensure_future(

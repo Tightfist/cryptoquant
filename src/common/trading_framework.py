@@ -405,14 +405,13 @@ class BaseStrategy(ABC):
             
             # 计算开仓数量
             try:
-                quantity = await calculate_order_size(
+                quantity, tgt_ccy = calculate_order_size(
                     self.trader, 
                     symbol=signal.symbol, 
-                    amount=position_usdt,
-                    unit=unit_type, 
-                    price=entry_price,
-                    is_spot=is_spot,
-                    leverage=leverage
+                    position_usdt=position_usdt,
+                    unit_type=unit_type, 
+                    leverage=leverage,
+                    side=side
                 )
             except Exception as e:
                 self.logger.error(f"计算开仓数量异常: {e}", exc_info=True)
@@ -460,7 +459,7 @@ class BaseStrategy(ABC):
             try:
                 self.logger.info(f"设置杠杆: {signal.symbol} {leverage}倍")
                 set_leverage_result = self.trader.set_leverage(
-                    symbol=signal.symbol,
+                    inst_id=signal.symbol,
                     leverage=leverage
                 )
                 
@@ -971,11 +970,11 @@ class BaseStrategy(ABC):
             ladder_tp_step = position.ladder_tp_step
             ladder_closed_pct = getattr(position, 'ladder_closed_pct', 0.0)
             
-            # 计算当前盈利百分比
+            # 计算当前盈利百分比 - 使用杠杆后的收益率
             if position.direction == 'long':
-                current_pnl_pct = (mark_price - position.entry_price) / position.entry_price
+                current_pnl_pct = (mark_price - position.entry_price) / position.entry_price * position.leverage
             else:  # short
-                current_pnl_pct = (position.entry_price - mark_price) / position.entry_price
+                current_pnl_pct = (position.entry_price - mark_price) / position.entry_price * position.leverage
             
             # 计算应该触发的阶梯级别（向下取整）
             current_ladder_level = int(current_pnl_pct / ladder_tp_step)
@@ -988,14 +987,62 @@ class BaseStrategy(ABC):
                 # 计算本次应平仓的比例
                 close_pct_this_time = target_closed_pct - ladder_closed_pct
                 
-                self.logger.info(f"{symbol} 触发阶梯止盈(第{current_ladder_level}档), 盈利: {current_pnl_pct*100:.2f}%, 本次平仓比例: {close_pct_this_time*100:.0f}%, 累计平仓比例: {target_closed_pct*100:.0f}%")
+                self.logger.info(f"{symbol} 触发阶梯止盈(第{current_ladder_level}档), 杠杆后盈利: {current_pnl_pct*100:.2f}%, 本次平仓比例: {close_pct_this_time*100:.0f}%, 累计平仓比例: {target_closed_pct*100:.0f}%")
                 
-                # TODO: 实现部分平仓逻辑
-                # 这里需要实现部分平仓的逻辑，暂时先完全平仓
-                self.logger.warning(f"阶梯止盈目前仅实现了全部平仓，未来会支持部分平仓")
-                await self._execute_close_position(symbol, position)
+                # 实现部分平仓逻辑
+                # 计算要平仓的数量
+                close_quantity = abs(position.quantity) * close_pct_this_time
+                
+                # 执行部分平仓
+                try:
+                    # 确定持仓方向
+                    pos_side = "long" if position.direction == "long" else "short"
+                    # 平仓方向与开仓相反
+                    side = "sell" if position.direction == "long" else "buy"
+                    
+                    # 更新已平仓比例
+                    position.ladder_closed_pct = target_closed_pct
+                    
+                    # 更新持仓数据库
+                    self.position_mgr.save_position(position)
+                    
+                    # 执行部分平仓操作 - 注意这里不使用await，因为swap_order不是异步方法
+                    close_result = self.trader.swap_order(
+                        inst_id=symbol,
+                        side=side,
+                        pos_side=pos_side,
+                        sz=close_quantity
+                    )
+                    
+                    if close_result and close_result.get('code') == '0':
+                        # 更新持仓数量
+                        position.quantity = position.quantity * (1 - close_pct_this_time)
+                        
+                        # 记录平仓信息
+                        self.logger.info(f"{symbol} 部分平仓成功，平仓数量: {close_quantity}, 剩余持仓: {abs(position.quantity)}")
+                        
+                        # 检查是否已全部平仓
+                        if abs(position.quantity) < 0.0001 or target_closed_pct >= 0.9999:
+                            self.logger.info(f"{symbol} 持仓已全部平仓")
+                            position.closed = True
+                            self.position_mgr.save_position(position)
+                            self.positions.pop(symbol, None)
+                        else:
+                            # 更新持仓数据库
+                            self.position_mgr.save_position(position)
+                    else:
+                        error_msg = close_result.get('msg', 'Unknown error') if close_result else 'No response'
+                        self.logger.error(f"部分平仓失败: {error_msg}")
+                        self.logger.warning(f"部分平仓失败，尝试全部平仓")
+                        await self._execute_close_position(symbol, position)
+                    
+                except Exception as e:
+                    self.logger.error(f"执行部分平仓异常: {e}")
+                    self.logger.warning(f"部分平仓失败，执行全部平仓")
+                    await self._execute_close_position(symbol, position)
+                
                 return
-            
+        
         # 检查常规止盈
         if position.direction == 'long' and mark_price >= take_profit_price:
             self.logger.info(f"{symbol} 触发止盈，价格: {mark_price} >= {take_profit_price}")
