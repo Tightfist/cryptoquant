@@ -248,48 +248,75 @@ class TradingViewStrategy(BaseStrategy):
             if tp_price and entry_price and not take_profit_pct:
                 if direction == "long":
                     take_profit_pct = (float(tp_price) - float(entry_price)) / float(entry_price)
-                else:  # short
+                else:
                     take_profit_pct = (float(entry_price) - float(tp_price)) / float(entry_price)
-                
+                    
             if sl_price and entry_price and not stop_loss_pct:
                 if direction == "long":
                     stop_loss_pct = (float(entry_price) - float(sl_price)) / float(entry_price)
-                else:  # short
+                else:
                     stop_loss_pct = (float(sl_price) - float(entry_price)) / float(entry_price)
             
-            # 获取追踪止损参数
+            # 获取追踪止损设置
             trailing_stop = strategy.get('trailing_stop', signal_data.get('trailing_stop'))
             trailing_distance = strategy.get('trailing_distance', signal_data.get('trailing_distance'))
             
-            # 获取杠杆倍数
+            # 获取杠杆设置
             leverage = strategy.get('leverage', signal_data.get('leverage'))
             
-            # 获取单位类型
-            unit_type = strategy.get('unit_type', signal_data.get('unit_type'))
+            # 获取阶梯止盈设置
+            ladder_tp = strategy.get('ladder_tp', signal_data.get('ladder_tp', False))
+            ladder_tp_pct = strategy.get('ladder_tp_pct', signal_data.get('ladder_tp_pct', 0.2))
+            ladder_tp_step = strategy.get('ladder_tp_step', signal_data.get('ladder_tp_step', 0.2))
             
-            # 创建TradeSignal对象
-            trade_signal = TradeSignal(
+            # 获取风控参数
+            risk_control = {}
+            
+            # 最大持仓数
+            max_positions = strategy.get('max_positions', signal_data.get('max_positions'))
+            if max_positions is not None:
+                risk_control['max_positions'] = int(max_positions)
+                risk_control['enable_max_positions'] = True
+            
+            # 低交易额过滤
+            min_volume_filter = strategy.get('min_volume_filter', signal_data.get('min_volume_filter'))
+            if min_volume_filter is not None:
+                risk_control['min_volume_filter'] = float(min_volume_filter)
+                risk_control['enable_volume_filter'] = float(min_volume_filter) > 0
+            
+            # 整合额外数据
+            extra_data = {
+                'original_symbol': symbol,
+                'entry_time': time.time(),
+                'signal_source': 'tradingview'
+            }
+            
+            # 添加风控参数
+            if risk_control:
+                extra_data['risk_control'] = risk_control
+                
+            # 添加阶梯止盈参数
+            if ladder_tp:
+                extra_data['ladder_tp'] = True
+                extra_data['ladder_tp_pct'] = float(ladder_tp_pct)
+                extra_data['ladder_tp_step'] = float(ladder_tp_step)
+            
+            # 创建交易信号
+            signal = TradeSignal(
                 action="open",
                 symbol=okex_symbol,
                 direction=direction,
                 entry_price=float(entry_price) if entry_price else None,
                 quantity=float(quantity) if quantity else None,
-                take_profit_pct=float(take_profit_pct) if take_profit_pct else self.take_profit_pct,
-                stop_loss_pct=float(stop_loss_pct) if stop_loss_pct else self.stop_loss_pct,
-                trailing_stop=trailing_stop if trailing_stop is not None else self.trailing_stop,
-                trailing_distance=float(trailing_distance) if trailing_distance else self.trailing_distance,
-                leverage=int(leverage) if leverage else self.leverage,
-                unit_type=unit_type if unit_type else self.unit_type,
-                extra_data={
-                    "raw_signal": signal_data,
-                    "tv_symbol": symbol,
-                    "tp_price": tp_price,
-                    "sl_price": sl_price,
-                    "position_usdt": position_usdt
-                }
+                take_profit_pct=float(take_profit_pct) if take_profit_pct else None,
+                stop_loss_pct=float(stop_loss_pct) if stop_loss_pct else None,
+                trailing_stop=bool(trailing_stop) if trailing_stop is not None else None,
+                trailing_distance=float(trailing_distance) if trailing_distance else None,
+                leverage=int(leverage) if leverage else None,
+                extra_data=extra_data
             )
             
-            return trade_signal
+            return signal
         except Exception as e:
             self.logger.exception(f"解析开仓信号异常: {e}")
             return None

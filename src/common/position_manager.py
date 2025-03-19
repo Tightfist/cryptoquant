@@ -23,6 +23,28 @@ class Position:
     exit_timestamp: int = 0
     pnl_amount: float = 0.0
     pnl_percentage: float = 0.0
+    # 阶梯止盈相关参数
+    ladder_tp: bool = False  # 是否启用阶梯止盈
+    ladder_tp_pct: float = 0.2  # 阶梯止盈每档百分比(0.2表示每增加20%收益平仓20%)
+    ladder_tp_step: float = 0.2  # 阶梯止盈每档的档位(0.2表示20%收益，40%收益，60%收益...)
+    ladder_closed_pct: float = 0.0  # 已平仓的百分比
+    direction: str = None  # 方向：long或short
+    high_price: float = 0.0  # 持仓期间的最高价格
+    low_price: float = float('inf')  # 持仓期间的最低价格
+    signal: any = None  # 开仓信号
+    
+    def __post_init__(self):
+        """初始化后的处理"""
+        # 如果没有指定方向，则根据数量确定
+        if self.direction is None:
+            self.direction = "long" if self.quantity > 0 else "short"
+        
+        # 初始化高低价
+        if self.high_price == 0.0:
+            self.high_price = self.entry_price
+        
+        if self.low_price == float('inf'):
+            self.low_price = self.entry_price
 
 class PositionManager:
     def __init__(self, app_name: str, logger=None):
@@ -65,7 +87,11 @@ class PositionManager:
                      exit_price REAL,
                      exit_timestamp INTEGER,
                      pnl_amount REAL,
-                     pnl_percentage REAL)''')
+                     pnl_percentage REAL,
+                     ladder_tp INTEGER,
+                     ladder_tp_pct REAL,
+                     ladder_tp_step REAL,
+                     ladder_closed_pct REAL)''')
                 
                 # 创建索引
                 self.conn.execute('''CREATE INDEX idx_positions_symbol ON positions(symbol)''')
@@ -104,11 +130,15 @@ class PositionManager:
                              exit_price REAL,
                              exit_timestamp INTEGER,
                              pnl_amount REAL,
-                             pnl_percentage REAL)''')
+                             pnl_percentage REAL,
+                             ladder_tp INTEGER,
+                             ladder_tp_pct REAL,
+                             ladder_tp_step REAL,
+                             ladder_closed_pct REAL)''')
                         
                         # 复制数据
                         self.conn.execute('''INSERT INTO positions 
-                            SELECT * FROM positions_old''')
+                            SELECT *, 0, 0.2, 0.2, 0.0 FROM positions_old''')
                         
                         # 创建索引
                         self.conn.execute('''CREATE INDEX idx_positions_symbol ON positions(symbol)''')
@@ -137,6 +167,23 @@ class PositionManager:
                     if 'pnl_percentage' not in columns:
                         self.conn.execute('ALTER TABLE positions ADD COLUMN pnl_percentage REAL DEFAULT 0.0')
                         print("已添加pnl_percentage列")
+                    
+                    # 添加阶梯止盈相关列
+                    if 'ladder_tp' not in columns:
+                        self.conn.execute('ALTER TABLE positions ADD COLUMN ladder_tp INTEGER DEFAULT 0')
+                        print("已添加ladder_tp列")
+                    
+                    if 'ladder_tp_pct' not in columns:
+                        self.conn.execute('ALTER TABLE positions ADD COLUMN ladder_tp_pct REAL DEFAULT 0.2')
+                        print("已添加ladder_tp_pct列")
+                    
+                    if 'ladder_tp_step' not in columns:
+                        self.conn.execute('ALTER TABLE positions ADD COLUMN ladder_tp_step REAL DEFAULT 0.2')
+                        print("已添加ladder_tp_step列")
+                    
+                    if 'ladder_closed_pct' not in columns:
+                        self.conn.execute('ALTER TABLE positions ADD COLUMN ladder_closed_pct REAL DEFAULT 0.0')
+                        print("已添加ladder_closed_pct列")
                     
                     # 尝试创建索引（如果不存在）
                     try:
@@ -172,7 +219,11 @@ class PositionManager:
                     exit_price=row[8],
                     exit_timestamp=row[9],
                     pnl_amount=row[10],
-                    pnl_percentage=row[11]
+                    pnl_percentage=row[11],
+                    ladder_tp=bool(row[12]),
+                    ladder_tp_pct=row[13],
+                    ladder_tp_step=row[14],
+                    ladder_closed_pct=row[15]
                 )
                 positions[pos.symbol] = pos
         return positions
@@ -181,11 +232,13 @@ class PositionManager:
         """保存或更新仓位"""
         with self.db_lock:
             self.conn.execute('''REPLACE INTO positions VALUES 
-                (?,?,?,?,?,?,?,?,?,?,?,?)''', 
+                (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''', 
                 (position.symbol, position.position_id, position.entry_price,
                  position.quantity, position.position_type, position.leverage,
                  position.timestamp, int(position.closed), position.exit_price,
-                 position.exit_timestamp, position.pnl_amount, position.pnl_percentage))
+                 position.exit_timestamp, position.pnl_amount, position.pnl_percentage,
+                 int(position.ladder_tp), position.ladder_tp_pct, position.ladder_tp_step,
+                 position.ladder_closed_pct))
             self.conn.commit()
     
     def close_position(self, symbol: str, exit_price: float, exit_timestamp: int = None, pnl_amount: float = 0.0, pnl_percentage: float = 0.0, position_id: str = None):
@@ -275,21 +328,23 @@ class PositionManager:
         获取历史仓位记录
         
         Args:
-            start_date: 开始日期，格式为 YYYY-MM-DD，默认为30天前
-            end_date: 结束日期，格式为 YYYY-MM-DD，默认为今天
+            start_date: 开始日期，格式为 YYYY-MM-DD，默认为当天
+            end_date: 结束日期，格式为 YYYY-MM-DD，默认为当天
             symbol: 交易对，默认为所有
             limit: 最大返回记录数，默认100条
             
         Returns:
             List[Dict]: 历史仓位记录列表
         """
-        # 设置默认日期范围
+        # 设置默认日期范围为当天
+        today = datetime.datetime.now().strftime("%Y-%m-%d")
+        
+        # 如果未指定日期，使用当天
         if not end_date:
-            end_date = datetime.datetime.now().strftime("%Y-%m-%d")
+            end_date = today
         
         if not start_date:
-            # 默认查询30天
-            start_date = (datetime.datetime.now() - datetime.timedelta(days=30)).strftime("%Y-%m-%d")
+            start_date = today
         
         # 转换为时间戳
         start_ts = int(datetime.datetime.strptime(start_date, "%Y-%m-%d").timestamp() * 1000)

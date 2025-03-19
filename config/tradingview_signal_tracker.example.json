@@ -3,27 +3,46 @@
   "logging": {
     "level": "DEBUG",
     "file": "tradingview_signal_tracker.log",
-    "output_targets": ["file", "console"]
+    "output_targets": ["file"]
   },
-  "webhook": {
+  "http_server": {
+    "enabled": true,
     "host": "0.0.0.0",
     "port": 80,
-    "path": "/webhook"
+    "base_path": "/webhook"
   },
   "strategy": {
     "leverage": 18,
     "per_position_usdt": 100,
     "take_profit_pct": 0.055,
-    "stop_loss_pct": 0.0185,
+    "stop_loss_pct": 0.015,
     "trailing_stop": true,
     "trailing_distance": 0.0185,
     "unit_type": "quote",
     "enable_symbol_pool": false,
-    "default_symbols": ["BTC-USDT-SWAP"]
+    "verbose_log": false,
+    "default_symbols": ["BTC-USDT-SWAP"],
+    "ladder_take_profit": {
+      "enabled": true,
+      "step_pct": 0.2,
+      "close_pct": 0.2
+    }
   },
   "symbol_mapping": {
     "BTCUSDT.P": "BTC-USDT-SWAP",
     "ETHUSDT.P": "ETH-USDT-SWAP",
     "SWARMSUSDT.P": "SWARMS-USDT-SWAP"
-  }
+  },
+  "risk_control": {
+      "enable_cooling_period": false,
+      "cooling_period_minutes": 30,
+      "enable_daily_limit": false,
+      "max_daily_trades": 50,
+      "enable_loss_limit": false,
+      "max_daily_loss_pct": 50.0,
+      "enable_max_positions": true,
+      "max_positions": 10,
+      "enable_volume_filter": false,
+      "min_volume_filter": 0
+    }
 } 

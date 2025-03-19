@@ -1,0 +1,498 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>交易系统 - 仓位管理</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        .profit {
+            color: #28a745;
+            font-weight: bold;
+        }
+        .loss {
+            color: #dc3545;
+            font-weight: bold;
+        }
+        .position-card {
+            transition: all 0.3s ease;
+        }
+        .position-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 10px 20px rgba(0,0,0,0.1);
+        }
+        .refresh-btn {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            z-index: 999;
+        }
+        .ladder-progress {
+            height: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container mt-4">
+        <div class="d-flex justify-content-between align-items-center mb-4">
+            <h1>交易系统仓位管理</h1>
+            <div>
+                <button id="refreshBtn" class="btn btn-primary me-2">刷新数据</button>
+                <button id="closeAllBtn" class="btn btn-danger">一键平仓</button>
+            </div>
+        </div>
+        
+        <div class="row mb-4">
+            <div class="col-md-3">
+                <div class="card text-white bg-primary">
+                    <div class="card-body">
+                        <h5 class="card-title">当前持仓数</h5>
+                        <p class="card-text" id="totalPositions">加载中...</p>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="card text-white bg-success">
+                    <div class="card-body">
+                        <h5 class="card-title">浮动盈亏</h5>
+                        <p class="card-text" id="totalPnl">加载中...</p>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="card text-white bg-info">
+                    <div class="card-body">
+                        <h5 class="card-title">今日总盈亏</h5>
+                        <p class="card-text" id="todayPnl">加载中...</p>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="card text-white bg-warning">
+                    <div class="card-body">
+                        <h5 class="card-title">胜率</h5>
+                        <p class="card-text" id="winRate">加载中...</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="row" id="positionsContainer">
+            <div class="col-12 text-center py-5">
+                <div class="spinner-border text-primary" role="status">
+                    <span class="visually-hidden">Loading...</span>
+                </div>
+                <p class="mt-2">正在加载仓位数据...</p>
+            </div>
+        </div>
+
+        <!-- 历史仓位 -->
+        <div class="mt-5">
+            <h2>历史仓位</h2>
+            <div class="table-responsive">
+                <table class="table table-striped table-hover">
+                    <thead>
+                        <tr>
+                            <th>平仓时间</th>
+                            <th>交易对</th>
+                            <th>方向</th>
+                            <th>入场价</th>
+                            <th>出场价</th>
+                            <th>数量</th>
+                            <th>杠杆</th>
+                            <th>盈亏(USDT/百分比)</th>
+                            <th>持仓时间</th>
+                        </tr>
+                    </thead>
+                    <tbody id="historyTableBody">
+                        <tr>
+                            <td colspan="9" class="text-center">加载中...</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <!-- 平仓确认模态框 -->
+    <div class="modal fade" id="closePositionModal" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">确认平仓</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <p>确定要关闭 <span id="closeSymbol" class="fw-bold"></span> 的仓位吗？</p>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                    <button type="button" class="btn btn-danger" id="confirmCloseBtn">确认平仓</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 一键平仓确认模态框 -->
+    <div class="modal fade" id="closeAllModal" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">确认一键平仓</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <p>确定要关闭所有持仓吗？此操作无法撤销！</p>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                    <button type="button" class="btn btn-danger" id="confirmCloseAllBtn">确认平仓</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        // API基础路径
+        const API_BASE_PATH = '/webhook'; // 根据实际配置修改
+
+        // 当前选中的symbol
+        let selectedSymbol = '';
+        
+        // 初始化Bootstrap模态框
+        const closePositionModal = new bootstrap.Modal(document.getElementById('closePositionModal'));
+        const closeAllModal = new bootstrap.Modal(document.getElementById('closeAllModal'));
+        
+        // 页面加载完成后执行
+        document.addEventListener('DOMContentLoaded', function() {
+            // 加载数据
+            loadOpenPositions();
+            loadPositionHistory();
+            
+            // 设置刷新按钮事件
+            document.getElementById('refreshBtn').addEventListener('click', function() {
+                loadOpenPositions();
+                loadPositionHistory();
+            });
+            
+            // 设置关闭所有仓位按钮事件
+            document.getElementById('closeAllBtn').addEventListener('click', function() {
+                closeAllModal.show();
+            });
+            
+            // 确认关闭指定仓位
+            document.getElementById('confirmCloseBtn').addEventListener('click', function() {
+                closePosition(selectedSymbol);
+                closePositionModal.hide();
+            });
+            
+            // 确认关闭所有仓位
+            document.getElementById('confirmCloseAllBtn').addEventListener('click', function() {
+                closeAllPositions();
+                closeAllModal.hide();
+            });
+            
+            // 设置自动刷新（每30秒）
+            setInterval(function() {
+                loadOpenPositions();
+            }, 30000);
+        });
+        
+        // 加载未平仓仓位
+        function loadOpenPositions() {
+            fetch(`${API_BASE_PATH}/api/open_positions`)
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        renderOpenPositions(data.data);
+                        updateSummary(data.data);
+                    } else {
+                        console.error('加载未平仓仓位失败:', data.message);
+                    }
+                })
+                .catch(error => {
+                    console.error('API请求异常:', error);
+                });
+        }
+        
+        // 加载历史仓位
+        function loadPositionHistory() {
+            fetch(`${API_BASE_PATH}/api/position_history`)
+                .then(response => response.json())
+                .then(data => {
+                    console.log("历史仓位API返回数据:", data);
+                    if (data.success) {
+                        // 调试输出
+                        console.log(`获取到 ${data.data.length} 条历史仓位数据`);
+                        if (data.data.length > 0) {
+                            console.log("第一条记录:", data.data[0]);
+                        }
+                        renderPositionHistory(data.data);
+                    } else {
+                        console.error('加载历史仓位失败:', data.message);
+                    }
+                })
+                .catch(error => {
+                    console.error('API请求异常:', error);
+                });
+        }
+        
+        // 渲染未平仓仓位
+        function renderOpenPositions(positions) {
+            const container = document.getElementById('positionsContainer');
+            
+            if (!positions || positions.length === 0) {
+                container.innerHTML = '<div class="col-12 text-center py-5"><p>当前没有持仓</p></div>';
+                return;
+            }
+            
+            let html = '';
+            
+            positions.forEach(position => {
+                const pnlClass = position.leveraged_pnl_pct >= 0 ? 'profit' : 'loss';
+                const pnlPercent = (position.leveraged_pnl_pct * 100).toFixed(2);
+                const pnlAmount = position.pnl_amount ? position.pnl_amount.toFixed(2) : '0.00';
+                const ladderActive = position.ladder_tp === true ? '已启用' : '未启用';
+                const ladderClass = position.ladder_tp === true ? 'text-success' : 'text-muted';
+                const ladderClosed = position.ladder_closed_pct ? (position.ladder_closed_pct * 100).toFixed(0) : '0';
+                
+                // 调试输出
+                console.log(`仓位 ${position.symbol} 阶梯止盈状态:`, position.ladder_tp);
+                console.log(`仓位 ${position.symbol} 止盈价格:`, position.take_profit_price);
+                console.log(`仓位 ${position.symbol} 止损价格:`, position.stop_loss_price);
+                
+                html += `
+                <div class="col-md-4 mb-4">
+                    <div class="card position-card">
+                        <div class="card-header d-flex justify-content-between align-items-center">
+                            <h5 class="mb-0">${position.symbol}</h5>
+                            <span class="badge ${position.direction === 'long' ? 'bg-success' : 'bg-danger'}">${position.direction === 'long' ? '多' : '空'}</span>
+                        </div>
+                        <div class="card-body">
+                            <div class="d-flex justify-content-between mb-3">
+                                <div>入场价:</div>
+                                <div>${position.entry_price}</div>
+                            </div>
+                            <div class="d-flex justify-content-between mb-3">
+                                <div>当前价:</div>
+                                <div>${position.current_price || '未知'}</div>
+                            </div>
+                            <div class="d-flex justify-content-between mb-3">
+                                <div>数量:</div>
+                                <div>${position.quantity}</div>
+                            </div>
+                            <div class="d-flex justify-content-between mb-3">
+                                <div>杠杆:</div>
+                                <div>${position.leverage}x</div>
+                            </div>
+                            <div class="d-flex justify-content-between mb-3">
+                                <div>止盈价:</div>
+                                <div>${typeof position.take_profit_price === 'number' ? position.take_profit_price.toFixed(4) : '未设置'}</div>
+                            </div>
+                            <div class="d-flex justify-content-between mb-3">
+                                <div>止损价:</div>
+                                <div>${typeof position.stop_loss_price === 'number' ? position.stop_loss_price.toFixed(4) : '未设置'}</div>
+                            </div>
+                            <div class="d-flex justify-content-between mb-3">
+                                <div>阶梯止盈:</div>
+                                <div class="${ladderClass}">${ladderActive}</div>
+                            </div>
+                            ${position.ladder_tp ? `
+                            <div class="mb-3">
+                                <small>已平仓比例: ${ladderClosed}%</small>
+                                <div class="progress ladder-progress">
+                                    <div class="progress-bar bg-success" role="progressbar" style="width: ${ladderClosed}%" aria-valuenow="${ladderClosed}" aria-valuemin="0" aria-valuemax="100"></div>
+                                </div>
+                            </div>` : ''}
+                            <div class="d-flex justify-content-between mb-3">
+                                <div>盈亏:</div>
+                                <div class="${pnlClass}">${pnlAmount} USDT (${pnlPercent}%)</div>
+                            </div>
+                            <button class="btn btn-outline-danger w-100 mt-2 close-btn" data-symbol="${position.symbol}">平仓</button>
+                        </div>
+                    </div>
+                </div>`;
+            });
+            
+            container.innerHTML = html;
+            
+            // 添加平仓按钮事件
+            document.querySelectorAll('.close-btn').forEach(btn => {
+                btn.addEventListener('click', function() {
+                    selectedSymbol = this.getAttribute('data-symbol');
+                    document.getElementById('closeSymbol').textContent = selectedSymbol;
+                    closePositionModal.show();
+                });
+            });
+        }
+        
+        // 渲染历史仓位
+        function renderPositionHistory(positions) {
+            const tableBody = document.getElementById('historyTableBody');
+            
+            if (!positions || positions.length === 0) {
+                tableBody.innerHTML = '<tr><td colspan="9" class="text-center">没有历史仓位数据</td></tr>';
+                return;
+            }
+            
+            let html = '';
+            
+            positions.forEach(position => {
+                // 确保只处理已平仓的仓位
+                if (!position.closed && position.exit_timestamp <= 0) return;
+                
+                const pnlClass = position.pnl_amount >= 0 ? 'profit' : 'loss';
+                const pnlAmount = position.pnl_amount ? position.pnl_amount.toFixed(2) : '0.00';
+                const pnlPercentage = position.pnl_percentage ? position.pnl_percentage.toFixed(2) : '0.00';
+                const direction = position.direction || (position.quantity > 0 ? 'long' : 'short');
+                const directionText = direction === 'long' ? '多' : '空';
+                const exitTimeStr = position.exit_time || new Date(position.exit_timestamp).toLocaleString();
+                
+                html += `
+                <tr>
+                    <td>${exitTimeStr}</td>
+                    <td>${position.symbol}</td>
+                    <td>${directionText}</td>
+                    <td>${position.entry_price}</td>
+                    <td>${position.exit_price}</td>
+                    <td>${Math.abs(position.quantity)}</td>
+                    <td>${position.leverage}x</td>
+                    <td class="${pnlClass}">${pnlAmount} (${pnlPercentage}%)</td>
+                    <td>${formatHoldingTime(position.entry_timestamp || position.timestamp, position.exit_timestamp)}</td>
+                </tr>`;
+            });
+            
+            if (html === '') {
+                tableBody.innerHTML = '<tr><td colspan="9" class="text-center">没有历史仓位数据</td></tr>';
+            } else {
+                tableBody.innerHTML = html;
+            }
+        }
+        
+        // 更新统计信息
+        function updateSummary(positions) {
+            if (!positions || positions.length === 0) {
+                document.getElementById('totalPositions').textContent = '0';
+                document.getElementById('totalPnl').textContent = '0.00 USDT (0.00%)';
+                document.getElementById('todayPnl').textContent = '0.00 USDT';
+                document.getElementById('winRate').textContent = '0.00%';
+                return;
+            }
+            
+            const totalPositions = positions.length;
+            let totalPnlAmount = 0;
+            let totalPnlPct = 0;
+            
+            positions.forEach(position => {
+                if (position.pnl_amount) {
+                    totalPnlAmount += position.pnl_amount;
+                }
+                if (position.leveraged_pnl_pct) {
+                    totalPnlPct += position.leveraged_pnl_pct;
+                }
+            });
+            
+            // 计算平均盈亏百分比
+            const avgPnlPct = totalPnlPct / totalPositions;
+            
+            // 获取当日收益和胜率信息
+            fetch(`${API_BASE_PATH}/api/daily_pnl`)
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success && data.data) {
+                        const todayPnl = data.data.today_pnl || 0;
+                        const todayPnlFloat = parseFloat(todayPnl) + totalPnlAmount; // 今日平仓盈亏 + 浮动盈亏
+                        document.getElementById('todayPnl').textContent = todayPnlFloat.toFixed(2) + ' USDT';
+                        document.getElementById('todayPnl').className = todayPnlFloat >= 0 ? 'card-text profit' : 'card-text loss';
+                        
+                        const winRate = data.data.win_rate || 0;
+                        document.getElementById('winRate').textContent = winRate.toFixed(2) + '%';
+                    }
+                })
+                .catch(error => {
+                    console.error('获取日盈亏数据失败:', error);
+                    document.getElementById('todayPnl').textContent = '加载失败';
+                    document.getElementById('winRate').textContent = '加载失败';
+                });
+            
+            document.getElementById('totalPositions').textContent = totalPositions;
+            document.getElementById('totalPnl').textContent = `${totalPnlAmount.toFixed(2)} USDT (${(avgPnlPct * 100).toFixed(2)}%)`;
+            
+            // 添加颜色
+            document.getElementById('totalPnl').className = totalPnlAmount >= 0 ? 'card-text profit' : 'card-text loss';
+        }
+        
+        // 平仓特定交易对
+        function closePosition(symbol) {
+            fetch(`${API_BASE_PATH}/api/trigger`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    action: 'close',
+                    symbol: symbol
+                })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    alert(`已成功平仓 ${symbol}`);
+                    loadOpenPositions();
+                    loadPositionHistory();
+                } else {
+                    alert(`平仓失败: ${data.message}`);
+                }
+            })
+            .catch(error => {
+                console.error('API请求异常:', error);
+                alert('平仓请求发送失败，请查看控制台了解详情');
+            });
+        }
+        
+        // 平仓所有持仓
+        function closeAllPositions() {
+            fetch(`${API_BASE_PATH}/api/close_all`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({})
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    alert('已成功平仓所有持仓');
+                    loadOpenPositions();
+                    loadPositionHistory();
+                } else {
+                    alert(`平仓失败: ${data.message}`);
+                }
+            })
+            .catch(error => {
+                console.error('API请求异常:', error);
+                alert('平仓请求发送失败，请查看控制台了解详情');
+            });
+        }
+        
+        // 格式化持仓时间
+        function formatHoldingTime(startTime, endTime) {
+            if (!startTime || !endTime) return 'N/A';
+            
+            const diffMs = endTime - startTime;
+            const diffSec = Math.floor(diffMs / 1000);
+            
+            if (diffSec < 60) {
+                return `${diffSec}秒`;
+            } else if (diffSec < 3600) {
+                return `${Math.floor(diffSec/60)}分钟`;
+            } else if (diffSec < 86400) {
+                return `${Math.floor(diffSec/3600)}小时${Math.floor((diffSec%3600)/60)}分钟`;
+            } else {
+                return `${Math.floor(diffSec/86400)}天${Math.floor((diffSec%86400)/3600)}小时`;
+            }
+        }
+    </script>
+</body>
+</html> 

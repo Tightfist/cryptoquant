@@ -27,7 +27,6 @@ sys.path.append(str(Path(__file__).parents[2]))
 from src.common.logger import configure_logger
 from src.common.event_loop import AsyncEventLoop
 from src.common.config_loader import get_app_config
-from src.common.http.server import HttpServer
 from src.common.trading_framework import TradingFramework, TradeSignal
 from src.common.http.api_handlers import TradingFrameworkApiHandler
 from src.common.scripts.generate_api_scripts import generate_api_scripts
@@ -98,45 +97,43 @@ class TradingViewSignalApp:
     
     def _init_http_server(self):
         """初始化HTTP服务器"""
-        # 从配置中获取HTTP服务器设置
-        webhook_config = self.config.get('webhook', {})
-        self.port = webhook_config.get('port', 80)
-        self.host = webhook_config.get('host', '0.0.0.0')
-        self.path = webhook_config.get('path', '/webhook')
-        
-        # 正确初始化HTTP服务器
-        self.http_server = HttpServer(
-            port=self.port,
-            message_handler=self._handle_webhook,
-            host=self.host,
-            path=self.path
-        )
-        
-        self.logger.info(f"HTTP服务器初始化完成, 监听地址: {self.host}:{self.port}{self.path}")
-    
-    def _generate_api_scripts(self):
-        """生成API脚本"""
-        # 检查脚本目录
-        scripts_dir = os.path.join(os.path.dirname(__file__), 'scripts')
-        os.makedirs(scripts_dir, exist_ok=True)
-        
-        # 生成脚本
-        try:
-            # 获取端口
-            port = str(self.port)
-            # 获取基础路径
-            base_path = self.path
+        # 兼容性检查：尝试获取http_server配置，如果不存在则使用webhook配置
+        http_config = self.config.get('http_server', None)
+        if http_config is None:
+            # 使用旧的webhook配置
+            webhook_config = self.config.get('webhook', {})
+            self.port = webhook_config.get('port', 80)
+            self.host = webhook_config.get('host', '0.0.0.0')
+            self.base_path = webhook_config.get('path', '/webhook')
             
-            # 生成脚本
-            scripts = generate_api_scripts(scripts_dir, self.app_name, port, base_path)
+            # 使用旧版方式初始化HTTP服务器
+            self.http_server = HttpServer(
+                port=self.port,
+                message_handler=self._handle_webhook,
+                host=self.host,
+                path=self.base_path
+            )
             
-            # 设置执行权限
-            for script_path in scripts.values():
-                os.chmod(script_path, 0o755)
+            self.logger.info(f"使用传统模式初始化HTTP服务器, 监听地址: {self.host}:{self.port}{self.base_path}")
+            self._use_new_http_server = False
+        else:
+            # 使用新的http_server配置
+            enabled = http_config.get('enabled', True)
+            
+            if not enabled:
+                self.logger.info("HTTP服务器已禁用")
+                self._use_new_http_server = False
+                return
                 
-            self.logger.info(f"生成API脚本成功，位于: {scripts_dir}")
-        except Exception as e:
-            self.logger.error(f"生成API脚本失败: {e}")
+            self.port = http_config.get('port', 8080)
+            self.host = http_config.get('host', '0.0.0.0')
+            self.base_path = http_config.get('base_path', '/webhook')
+            
+            # HTTP服务器会在异步任务中启动
+            self.http_server = None
+            
+            self.logger.info(f"使用新模式初始化HTTP服务器, 监听地址: {self.host}:{self.port}")
+            self._use_new_http_server = True
     
     async def _handle_webhook(self, data: Dict[str, Any], request):
         """
@@ -166,29 +163,144 @@ class TradingViewSignalApp:
             }
     
     async def start_http_server(self):
-        """启动HTTP服务器和注册其他API路由"""
+        """启动HTTP服务器和注册API路由"""
         self.logger.info("启动HTTP服务器...")
         
-        # 创建API处理器并注册路由
-        api_handler = TradingFrameworkApiHandler(self.framework, self.app_name)
-        api_handler.register_routes(self.http_server.app, self.path)
-        
-        # 添加CORS支持
-        cors = setup_cors(self.http_server.app, defaults={
-            "*": ResourceOptions(
-                allow_credentials=True,
-                expose_headers="*",
-                allow_headers="*",
-                allow_methods=["GET", "POST", "OPTIONS"]
-            )
-        })
-        
-        # 为所有路由添加CORS支持
-        for route in list(self.http_server.app.router.routes()):
-            cors.add(route)
+        # 检查是否有HTTP服务器配置
+        if not hasattr(self, '_use_new_http_server'):
+            self.logger.info("HTTP服务器未初始化，跳过启动")
+            return
             
-        # 启动HTTP服务器
-        await self.http_server.start()
+        # 选择HTTP服务器模式
+        if not self._use_new_http_server:
+            # 使用传统HTTP服务器
+            try:
+                # 创建API处理器并注册路由
+                api_handler = TradingFrameworkApiHandler(self.framework, self.app_name)
+                api_handler.register_routes(self.http_server.app, self.base_path)
+                
+                # 添加CORS支持
+                cors = setup_cors(self.http_server.app, defaults={
+                    "*": ResourceOptions(
+                        allow_credentials=True,
+                        expose_headers="*",
+                        allow_headers="*",
+                        allow_methods=["GET", "POST", "OPTIONS"]
+                    )
+                })
+                
+                # 为所有路由添加CORS支持
+                for route in list(self.http_server.app.router.routes()):
+                    cors.add(route)
+                    
+                # 启动HTTP服务器
+                await self.http_server.start()
+                self.logger.info(f"HTTP服务器启动完成 (传统模式)，访问地址: http://{self.host}:{self.port}")
+            except Exception as e:
+                self.logger.exception(f"启动传统HTTP服务器异常: {e}")
+        else:
+            # 使用新HTTP服务器
+            try:
+                # 创建API处理器
+                api_handler = TradingFrameworkApiHandler(self.framework, self.app_name)
+                
+                # 准备路由列表
+                routes = []
+                
+                # 添加Webhook路由
+                async def handle_webhook(request):
+                    try:
+                        # 获取请求内容类型
+                        content_type = request.headers.get('Content-Type', '')
+                        
+                        if 'application/json' in content_type:
+                            # JSON格式
+                            data = await request.json()
+                        else:
+                            # 文本格式
+                            text = await request.text()
+                            try:
+                                # 尝试解析为JSON
+                                data = json.loads(text)
+                            except json.JSONDecodeError:
+                                # 非JSON格式，作为文本处理
+                                data = {"text": text}
+                        
+                        # 处理信号
+                        success, message = await self.framework.process_signal(data)
+                        
+                        # 返回结果
+                        return web.json_response({
+                            "success": success,
+                            "message": message
+                        })
+                    except Exception as e:
+                        self.logger.exception(f"处理webhook异常: {e}")
+                        return web.json_response(
+                            {"success": False, "message": f"处理异常: {e}"},
+                            status=500
+                        )
+                
+                # 添加Webhook路由
+                webhook_path = f"{self.base_path}" if self.base_path.endswith('/') else f"{self.base_path}/"
+                routes.append(('POST', webhook_path, handle_webhook))
+                
+                # 获取API路由
+                for route in api_handler.get_routes(self.base_path):
+                    routes.append(route)
+                
+                # 获取静态文件目录
+                static_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 
+                                        "src", "common", "http", "static")
+                
+                # 创建允许的CORS来源列表
+                cors_origins = ["*"]
+                
+                # 从module导入run_http_server
+                from src.common.http.server import run_http_server
+                
+                # 启动HTTP服务器
+                self.http_task = asyncio.ensure_future(
+                    run_http_server(
+                        host=self.host,
+                        port=self.port,
+                        routes=routes,
+                        static_dir=static_dir,
+                        static_path=f"{self.base_path}/static",
+                        cors_origins=cors_origins,
+                        logger=self.logger
+                    )
+                )
+                
+                self.logger.info(f"HTTP服务器启动完成 (新模式)，访问地址: http://{self.host}:{self.port}")
+                self.logger.info(f"仓位管理页面可通过访问: http://{self.host}:{self.port}/positions")
+                
+            except Exception as e:
+                self.logger.exception(f"启动新HTTP服务器异常: {e}")
+    
+    def _generate_api_scripts(self):
+        """生成API脚本"""
+        # 检查脚本目录
+        scripts_dir = os.path.join(os.path.dirname(__file__), 'scripts')
+        os.makedirs(scripts_dir, exist_ok=True)
+        
+        # 生成脚本
+        try:
+            # 获取端口
+            port = str(self.port)
+            # 获取基础路径
+            base_path = self.base_path
+            
+            # 生成脚本
+            scripts = generate_api_scripts(scripts_dir, self.app_name, port, base_path)
+            
+            # 设置执行权限
+            for script_path in scripts.values():
+                os.chmod(script_path, 0o755)
+                
+            self.logger.info(f"生成API脚本成功，位于: {scripts_dir}")
+        except Exception as e:
+            self.logger.error(f"生成API脚本失败: {e}")
     
     def _register_signal_handlers(self):
         """注册系统信号处理函数"""
@@ -207,7 +319,14 @@ class TradingViewSignalApp:
         
         # 关闭HTTP服务器
         try:
-            await self.http_server.stop()
+            if hasattr(self, '_use_new_http_server') and self._use_new_http_server:
+                if hasattr(self, 'http_task') and self.http_task:
+                    self.http_task.cancel()
+                    self.logger.info("HTTP服务器已关闭 (新模式)")
+            else:
+                if hasattr(self, 'http_server') and self.http_server:
+                    await self.http_server.stop()
+                    self.logger.info("HTTP服务器已关闭 (传统模式)")
         except Exception as e:
             self.logger.error(f"关闭HTTP服务器异常: {e}")
         
@@ -215,21 +334,15 @@ class TradingViewSignalApp:
     
     async def _run_framework_forever(self):
         """运行框架监控任务的包装函数"""
-        await self.framework.run_forever(position_monitor_interval=30)
+        await self.framework.run_forever(position_monitor_interval=15)
     
     def _setup_tasks(self):
-        """设置定时任务"""
-        # 添加HTTP服务器启动任务
-        self.event_loop.add_task(
-            self.start_http_server,
-            immediate=True
-        )
+        """设置异步任务"""
+        # 启动HTTP服务器
+        self.event_loop.add_task(self.start_http_server())
         
-        # 添加策略监控任务 - 使用包装函数替代kwargs参数
-        self.event_loop.add_task(
-            self._run_framework_forever,
-            immediate=True
-        )
+        # 添加策略监控任务
+        self.event_loop.add_task(self._run_framework_forever())
     
     def run(self):
         """运行应用"""

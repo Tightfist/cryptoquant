@@ -432,4 +432,52 @@ class OKExTrader(ExchangeAdapter):
         self.logger.info("批量下单", extra={"order_count": len(orders)})
         return self._request("POST", "/api/v5/trade/batch-orders", {"orders": orders})
 
+    # ------------------- 统一下单接口 -------------------
+    def order_market(self, symbol: str, side: str, size: float, is_spot: bool) -> dict:
+        """
+        统一下单接口，根据是否为现货调用不同的下单方法
+        
+        Args:
+            symbol: 交易对，如 BTC-USDT-SWAP 或 BTC-USDT
+            side: 方向，buy 或 sell
+            size: 数量
+            is_spot: 是否为现货
+            
+        Returns:
+            dict: 订单结果
+        """
+        self.logger.info(f"下单请求: {symbol} {side} {size} {'现货' if is_spot else '合约'}")
+        
+        try:
+            if is_spot:
+                # 现货下单
+                result = self.spot_order(
+                    inst_id=symbol,
+                    side=side,
+                    sz=size
+                )
+            else:
+                # 合约下单
+                # 确定持仓方向，买入=做多，卖出=做空
+                pos_side = "long" if side == "buy" else "short"
+                
+                result = self.swap_order(
+                    inst_id=symbol,
+                    side=side,
+                    pos_side=pos_side,
+                    sz=size
+                )
+            
+            # 统一处理结果
+            if result.get('code') == '0':
+                self.logger.info(f"下单成功: {symbol}", extra={"order_id": result.get('data', [{}])[0].get('ordId')})
+                return result
+            else:
+                error_msg = result.get('msg', '未知错误')
+                self.logger.error(f"下单失败: {error_msg}")
+                return {"error": error_msg, "data": []}
+        except Exception as e:
+            self.logger.error(f"下单异常: {e}", exc_info=True)
+            return {"error": str(e), "data": []}
+
 
