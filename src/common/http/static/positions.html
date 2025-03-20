@@ -93,6 +93,7 @@
                 <table class="table table-striped table-hover">
                     <thead>
                         <tr>
+                            <th>序号</th>
                             <th>平仓时间</th>
                             <th>交易对</th>
                             <th>方向</th>
@@ -106,7 +107,7 @@
                     </thead>
                     <tbody id="historyTableBody">
                         <tr>
-                            <td colspan="9" class="text-center">加载中...</td>
+                            <td colspan="10" class="text-center">加载中...</td>
                         </tr>
                     </tbody>
                 </table>
@@ -332,16 +333,20 @@
             const tableBody = document.getElementById('historyTableBody');
             
             if (!positions || positions.length === 0) {
-                tableBody.innerHTML = '<tr><td colspan="9" class="text-center">没有历史仓位数据</td></tr>';
+                tableBody.innerHTML = '<tr><td colspan="10" class="text-center">没有历史仓位数据</td></tr>';
                 return;
             }
             
             let html = '';
             
-            positions.forEach(position => {
+            // 对仓位按照平仓时间倒序排序（最新的在前面）
+            positions.sort((a, b) => (b.exit_timestamp || 0) - (a.exit_timestamp || 0));
+            
+            positions.forEach((position, index) => {
                 // 确保只处理已平仓的仓位
                 if (!position.closed && position.exit_timestamp <= 0) return;
                 
+                const sequenceNumber = positions.length - index; // 最新的仓位序号最大
                 const pnlClass = position.pnl_amount >= 0 ? 'profit' : 'loss';
                 const pnlAmount = position.pnl_amount ? position.pnl_amount.toFixed(2) : '0.00';
                 const pnlPercentage = position.pnl_percentage ? position.pnl_percentage.toFixed(2) : '0.00';
@@ -351,6 +356,7 @@
                 
                 html += `
                 <tr>
+                    <td>#${sequenceNumber}</td>
                     <td>${exitTimeStr}</td>
                     <td>${position.symbol}</td>
                     <td>${directionText}</td>
@@ -364,7 +370,7 @@
             });
             
             if (html === '') {
-                tableBody.innerHTML = '<tr><td colspan="9" class="text-center">没有历史仓位数据</td></tr>';
+                tableBody.innerHTML = '<tr><td colspan="10" class="text-center">没有历史仓位数据</td></tr>';
             } else {
                 tableBody.innerHTML = html;
             }
