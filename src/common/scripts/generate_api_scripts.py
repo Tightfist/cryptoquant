@@ -787,16 +787,39 @@ else
     # 使用Python解析JSON并格式化输出
     python3 -c "
 import json, sys
-data = json.loads(sys.stdin.read())
-if 'data' in data and data['data']:
-    for item in data['data']:
-        date = item.get('date', 'N/A')
-        pnl = item.get('pnl', 0)
-        count = item.get('position_count', 0)
-        avg_pct = item.get('avg_pnl_percentage', 0)
-        print(f'{date} | {pnl:10.2f} | {count:8d} | {avg_pct:12.2f}')
-else:
-    print('没有收益数据')
+try:
+    data = json.load(sys.stdin)
+    if isinstance(data, dict) and 'data' in data and data['data']:
+        data_obj = data['data']
+        if isinstance(data_obj, dict):
+            # 处理dict格式的data字段 (汇总信息)
+            today_pnl = float(data_obj.get('today_pnl', 0))
+            win_rate = float(data_obj.get('win_rate', 0))
+            win_count = int(data_obj.get('win_count', 0))
+            total_closed = int(data_obj.get('total_closed', 0))
+            
+            print(f'今日       | {today_pnl:10.2f} | {total_closed:8d} | {win_rate:12.2f}')
+            print(f'--------------------------------')
+            print(f'胜率: {win_rate:.2f}% (赢: {win_count}/{total_closed})')
+        elif isinstance(data_obj, list):
+            # 处理列表格式 (按日期的历史数据)
+            for item in data_obj:
+                if not isinstance(item, dict):
+                    continue
+                date = item.get('date', 'N/A')
+                pnl = float(item.get('pnl', 0))
+                count = int(item.get('position_count', 0))
+                avg_pct = float(item.get('avg_pnl_percentage', 0))
+                print(f'{date} | {pnl:10.2f} | {count:8d} | {avg_pct:12.2f}')
+        else:
+            print(f'警告: 无法识别的数据格式: {type(data_obj)}')
+            print('没有收益数据')
+    else:
+        print('没有收益数据')
+except Exception as e:
+    print(f'解析数据时出错: {str(e)}')
+    print('原始响应:')
+    print(sys.stdin.read())
 " <<< "$RESPONSE"
     
     echo "========================================================"

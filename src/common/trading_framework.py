@@ -984,61 +984,81 @@ class BaseStrategy(ABC):
             
             # 如果应平仓百分比大于已平仓百分比，则执行部分平仓
             if current_ladder_level > 0 and target_closed_pct > ladder_closed_pct:
-                # 计算本次应平仓的比例
-                close_pct_this_time = target_closed_pct - ladder_closed_pct
+                # 计算本次要平仓的百分比和数量
+                close_pct_this_time = target_closed_pct - position.ladder_closed_pct
                 
-                self.logger.info(f"{symbol} 触发阶梯止盈(第{current_ladder_level}档), 杠杆后盈利: {current_pnl_pct*100:.2f}%, 本次平仓比例: {close_pct_this_time*100:.0f}%, 累计平仓比例: {target_closed_pct*100:.0f}%")
+                # 原数量
+                original_quantity = abs(position.quantity)
                 
-                # 实现部分平仓逻辑
-                # 计算要平仓的数量
-                close_quantity = abs(position.quantity) * close_pct_this_time
+                # 原始计划平仓数量
+                raw_close_quantity = original_quantity * close_pct_this_time
                 
-                # 执行部分平仓
+                # 获取合约信息，用于圆整数量
                 try:
-                    # 确定持仓方向
-                    pos_side = "long" if position.direction == "long" else "short"
-                    # 平仓方向与开仓相反
-                    side = "sell" if position.direction == "long" else "buy"
+                    contract_info = self.trader.get_contract_info(symbol, False)["data"][0]
                     
-                    # 更新已平仓比例
-                    position.ladder_closed_pct = target_closed_pct
+                    # 获取最小交易单位
+                    lot_size = float(contract_info['lotSz']) if 'lotSz' in contract_info else 1
                     
-                    # 更新持仓数据库
-                    self.position_mgr.save_position(position)
-                    
-                    # 执行部分平仓操作 - 注意这里不使用await，因为swap_order不是异步方法
-                    close_result = self.trader.swap_order(
-                        inst_id=symbol,
-                        side=side,
-                        pos_side=pos_side,
-                        sz=close_quantity
-                    )
-                    
-                    if close_result and close_result.get('code') == '0':
-                        # 更新持仓数量
-                        position.quantity = position.quantity * (1 - close_pct_this_time)
-                        
-                        # 记录平仓信息
-                        self.logger.info(f"{symbol} 部分平仓成功，平仓数量: {close_quantity}, 剩余持仓: {abs(position.quantity)}")
-                        
-                        # 检查是否已全部平仓
-                        if abs(position.quantity) < 0.0001 or target_closed_pct >= 0.9999:
-                            self.logger.info(f"{symbol} 持仓已全部平仓")
-                            position.closed = True
-                            self.position_mgr.save_position(position)
-                            self.positions.pop(symbol, None)
-                        else:
-                            # 更新持仓数据库
-                            self.position_mgr.save_position(position)
+                    # 计算精度
+                    if '.' in str(contract_info.get('lotSz', '1')):
+                        precision = str(contract_info['lotSz']).split('.')[1].find('1') + 1
                     else:
-                        error_msg = close_result.get('msg', 'Unknown error') if close_result else 'No response'
-                        self.logger.error(f"部分平仓失败: {error_msg}")
-                        self.logger.warning(f"部分平仓失败，尝试全部平仓")
-                        await self._execute_close_position(symbol, position)
+                        precision = 0
                     
+                    # 圆整平仓数量
+                    close_quantity = round(raw_close_quantity / lot_size) * lot_size
+                    close_quantity = round(close_quantity, precision)
+                    close_quantity = max(close_quantity, lot_size)  # 确保不低于最小交易单位
+                    
+                    # 校正平仓百分比
+                    close_pct_this_time = close_quantity / original_quantity if original_quantity > 0 else 0
+                    
+                    self.logger.info(f"{symbol} 圆整平仓数量: 原始={raw_close_quantity}, 圆整后={close_quantity}, 对应百分比={close_pct_this_time*100:.2f}%")
                 except Exception as e:
-                    self.logger.error(f"执行部分平仓异常: {e}")
-                    self.logger.warning(f"部分平仓失败，执行全部平仓")
+                    # 如果获取合约信息失败，使用原始数量
+                    close_quantity = raw_close_quantity
+                    self.logger.warning(f"获取合约信息圆整数量失败，使用原始数量: {e}")
+                
+                # 确定持仓方向
+                pos_side = "long" if position.direction == "long" else "short"
+                # 平仓方向与开仓相反
+                side = "sell" if position.direction == "long" else "buy"
+                
+                # 更新已平仓比例
+                position.ladder_closed_pct = target_closed_pct
+                
+                # 更新持仓数据库
+                self.position_mgr.save_position(position)
+                
+                # 执行部分平仓操作 - 注意这里不使用await，因为swap_order不是异步方法
+                close_result = self.trader.swap_order(
+                    inst_id=symbol,
+                    side=side,
+                    pos_side=pos_side,
+                    sz=close_quantity
+                )
+                
+                if close_result and close_result.get('code') == '0':
+                    # 更新持仓数量
+                    position.quantity = position.quantity * (1 - close_pct_this_time)
+                    
+                    # 记录平仓信息
+                    self.logger.info(f"{symbol} 部分平仓成功，平仓数量: {close_quantity}, 剩余持仓: {abs(position.quantity)}")
+                    
+                    # 检查是否已全部平仓
+                    if abs(position.quantity) < 0.0001 or target_closed_pct >= 0.9999:
+                        self.logger.info(f"{symbol} 持仓已全部平仓")
+                        position.closed = True
+                        self.position_mgr.save_position(position)
+                        self.positions.pop(symbol, None)
+                    else:
+                        # 更新持仓数据库
+                        self.position_mgr.save_position(position)
+                else:
+                    error_msg = close_result.get('msg', 'Unknown error') if close_result else 'No response'
+                    self.logger.error(f"部分平仓失败: {error_msg}")
+                    self.logger.warning(f"部分平仓失败，尝试全部平仓")
                     await self._execute_close_position(symbol, position)
                 
                 return
@@ -1343,6 +1363,25 @@ class BaseStrategy(ABC):
         """
         # 实现初始化风控组件的逻辑
         pass
+
+    def initialize(self):
+        """初始化策略"""
+        if hasattr(self, '_initialized') and self._initialized:
+            return
+            
+        # 标记为已初始化
+        self._initialized = True
+        
+        # 同步数据
+        self._sync_positions()
+        
+        # 同步风控系统中的持仓数量
+        if hasattr(self.position_mgr, 'risk_controller') and self.positions:
+            self.position_mgr.risk_controller.set_positions_count(len(self.positions))
+            self.logger.info(f"初始化风控持仓数量: {len(self.positions)}")
+            
+        # 初始化子类
+        self._init_strategy()
 
 
 class TradingFramework:

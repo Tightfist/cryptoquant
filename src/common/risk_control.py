@@ -179,7 +179,7 @@ class RiskController:
         """
         # 如果没有风控参数，允许交易
         if risk_params is None:
-            return True, "未使用风控"
+            risk_params = {}
         
         # 检查交易额过滤
         if risk_params.get('enable_volume_filter', self.enable_volume_filter) and volume_24h is not None:
@@ -191,7 +191,7 @@ class RiskController:
         if risk_params.get('enable_max_positions', self.enable_max_positions):
             max_positions = risk_params.get('max_positions', self.max_positions)
             if self.current_positions_count >= max_positions:
-                return False, f"达到最大持仓数限制: {max_positions}个"
+                return False, f"达到最大持仓数限制: {max_positions}个，当前持仓: {self.current_positions_count}个"
         
         # 检查日交易上限
         if risk_params.get('enable_daily_limit', self.enable_daily_limit):
