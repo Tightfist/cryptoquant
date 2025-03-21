@@ -345,4 +345,16 @@ CryptoQuant采用分层架构设计:
 4. 推送到分支 (`git push origin feature/amazing-feature`)
 5. 创建Pull Request
 
-本项目采用MIT许可证。
+### 许可证
+
+本项目采用 [CC BY-NC (Creative Commons Attribution-NonCommercial)](https://creativecommons.org/licenses/by-nc/4.0/) 许可证。
+
+这意味着您可以：
+- 分享 - 复制和重新分发本项目的材料，以任何媒介或格式
+- 改编 - 重混、转换材料并以材料为基础进行创作
+
+但须遵守下列条件：
+- 署名 - 您必须给出适当的署名，提供指向本许可证的链接，同时标明是否做出了修改
+- 非商业性使用 - 您不得将本项目用于商业目的
+
+本项目仅供个人和学习研究使用，**禁止商业应用**。如需商业授权，请联系作者。

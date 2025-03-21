@@ -190,14 +190,6 @@ class TradingViewSignalApp:
                     )
                 })
                 
-                # 添加一个直接的测试路由
-                async def test_handler(request):
-                    self.logger.warning(f"测试路由收到请求: {request.method} {request.url}")
-                    return web.json_response({"status": "ok", "message": "测试路由正常"})
-                
-                self.http_server.app.router.add_get("/test", test_handler)
-                self.http_server.app.router.add_post("/test", test_handler)
-                
                 # 为所有路由添加CORS支持
                 for route in list(self.http_server.app.router.routes()):
                     cors.add(route)
@@ -277,15 +269,6 @@ class TradingViewSignalApp:
                 
                 # 从module导入run_http_server
                 from src.common.http.server import run_http_server
-                
-                # 添加测试路由
-                async def test_handler(request):
-                    self.logger.warning(f"测试路由收到请求: {request.method} {request.url}")
-                    return web.json_response({"status": "ok", "message": "测试路由正常"})
-                
-                routes.append(('GET', '/test', test_handler))
-                routes.append(('POST', '/test', test_handler))
-                self.logger.warning("添加测试路由: GET/POST /test")
                 
                 # 启动HTTP服务器
                 self.http_task = asyncio.ensure_future(
