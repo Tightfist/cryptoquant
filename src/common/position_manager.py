@@ -56,7 +56,11 @@ class PositionManager:
             logger: 日志记录器，如果不提供则使用应用名称创建一个
         """
         self.app_name = app_name
+        
+        # 确保数据库目录存在
+        os.makedirs("databases", exist_ok=True)
         self.db_path = os.path.join("databases", f"{app_name}.db")
+
         self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self.db_lock = Lock()
         self.logger = logger or logging.getLogger(f"{app_name}.position")

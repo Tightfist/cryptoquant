@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>交易系统 - 用户登录</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body {
+            background-color: #f8f9fa;
+            height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .login-container {
+            max-width: 400px;
+            width: 100%;
+            padding: 20px;
+            background-color: #fff;
+            border-radius: 10px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.1);
+        }
+        .form-control:focus {
+            box-shadow: 0 0 0 0.25rem rgba(13, 110, 253, 0.25);
+            border-color: #86b7fe;
+        }
+        .btn-primary {
+            background-color: #0d6efd;
+            border-color: #0d6efd;
+        }
+        .btn-primary:hover {
+            background-color: #0b5ed7;
+            border-color: #0a58ca;
+        }
+        .logo {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        .logo h1 {
+            color: #0d6efd;
+            font-weight: 700;
+        }
+        .toggle-form {
+            margin-top: 15px;
+            text-align: center;
+        }
+        .alert {
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <div class="login-container">
+        <div class="logo">
+            <h1>交易系统</h1>
+            <p>专业量化交易解决方案</p>
+        </div>
+        
+        <!-- 消息提示 -->
+        <div id="alertBox" class="alert alert-danger" role="alert"></div>
+        
+        <!-- 登录表单 -->
+        <div id="loginForm">
+            <h3 class="mb-3">用户登录</h3>
+            <form id="loginFormEl">
+                <div class="mb-3">
+                    <label for="loginUsername" class="form-label">用户名</label>
+                    <input type="text" class="form-control" id="loginUsername" required>
+                </div>
+                <div class="mb-3">
+                    <label for="loginPassword" class="form-label">密码</label>
+                    <input type="password" class="form-control" id="loginPassword" required>
+                </div>
+                <div class="d-grid">
+                    <button type="submit" class="btn btn-primary">登录</button>
+                </div>
+            </form>
+            <div class="toggle-form">
+                <p>还没有账号？<a href="#" id="showRegister">立即注册</a></p>
+            </div>
+        </div>
+        
+        <!-- 注册表单 -->
+        <div id="registerForm" style="display: none;">
+            <h3 class="mb-3">用户注册</h3>
+            <form id="registerFormEl">
+                <div class="mb-3">
+                    <label for="registerUsername" class="form-label">用户名</label>
+                    <input type="text" class="form-control" id="registerUsername" required>
+                    <div class="form-text">用户名长度必须在3-20个字符之间，只能包含字母和数字</div>
+                </div>
+                <div class="mb-3">
+                    <label for="registerPassword" class="form-label">密码</label>
+                    <input type="password" class="form-control" id="registerPassword" required>
+                    <div class="form-text">密码长度必须在6-20个字符之间，必须包含数字、小写字母和大写字母</div>
+                </div>
+                <div class="mb-3">
+                    <label for="registerEmail" class="form-label">电子邮箱</label>
+                    <input type="email" class="form-control" id="registerEmail">
+                    <div class="form-text">请输入有效的电子邮箱地址（选填）</div>
+                </div>
+                <div class="mb-3">
+                    <label for="registerInvitationCode" class="form-label">邀请码</label>
+                    <input type="text" class="form-control" id="registerInvitationCode">
+                    <div class="form-text">请输入有效的邀请码</div>
+                </div>
+                <div class="d-grid">
+                    <button type="submit" class="btn btn-primary">注册</button>
+                </div>
+            </form>
+            <div class="toggle-form">
+                <p>已有账号？<a href="#" id="showLogin">返回登录</a></p>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        // API基础路径
+        const API_BASE_PATH = '/api';
+        // 页面路径
+        const PAGE_BASE_PATH = '/static';
+        
+        // 元素引用
+        const loginForm = document.getElementById('loginForm');
+        const registerForm = document.getElementById('registerForm');
+        const loginFormEl = document.getElementById('loginFormEl');
+        const registerFormEl = document.getElementById('registerFormEl');
+        const showRegisterBtn = document.getElementById('showRegister');
+        const showLoginBtn = document.getElementById('showLogin');
+        const alertBox = document.getElementById('alertBox');
+        
+        // 切换表单显示
+        showRegisterBtn.addEventListener('click', function(e) {
+            e.preventDefault();
+            loginForm.style.display = 'none';
+            registerForm.style.display = 'block';
+            hideAlert();
+        });
+        
+        showLoginBtn.addEventListener('click', function(e) {
+            e.preventDefault();
+            registerForm.style.display = 'none';
+            loginForm.style.display = 'block';
+            hideAlert();
+        });
+        
+        // 登录表单提交
+        loginFormEl.addEventListener('submit', function(e) {
+            e.preventDefault();
+            
+            const username = document.getElementById('loginUsername').value;
+            const password = document.getElementById('loginPassword').value;
+            
+            fetch(`${API_BASE_PATH}/auth/login`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    username: username,
+                    password: password
+                })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    // 保存令牌到本地存储
+                    localStorage.setItem('auth_token', data.data.token);
+                    localStorage.setItem('username', data.data.username);
+                    localStorage.setItem('role', data.data.role);
+                    
+                    // 跳转到仓位页面
+                    window.location.href = `${PAGE_BASE_PATH}/positions.html`;
+                } else {
+                    showAlert(data.message || '登录失败');
+                }
+            })
+            .catch(error => {
+                console.error('登录请求异常:', error);
+                showAlert('登录请求失败，请稍后重试');
+            });
+        });
+        
+        // 注册表单提交
+        registerFormEl.addEventListener('submit', function(e) {
+            e.preventDefault();
+            
+            const username = document.getElementById('registerUsername').value;
+            const password = document.getElementById('registerPassword').value;
+            const email = document.getElementById('registerEmail').value;
+            const invitationCode = document.getElementById('registerInvitationCode').value;
+            
+            fetch(`${API_BASE_PATH}/auth/register`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    username: username,
+                    password: password,
+                    email: email,
+                    invitation_code: invitationCode
+                })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    // 保存令牌到本地存储
+                    localStorage.setItem('auth_token', data.data.token);
+                    localStorage.setItem('username', data.data.username);
+                    localStorage.setItem('role', data.data.role);
+                    
+                    // 跳转到仓位页面
+                    window.location.href = `${PAGE_BASE_PATH}/positions.html`;
+                } else {
+                    showAlert(data.message || '注册失败');
+                }
+            })
+            .catch(error => {
+                console.error('注册请求异常:', error);
+                showAlert('注册请求失败，请稍后重试');
+            });
+        });
+        
+        // 显示警告信息
+        function showAlert(message) {
+            alertBox.textContent = message;
+            alertBox.style.display = 'block';
+        }
+        
+        // 隐藏警告信息
+        function hideAlert() {
+            alertBox.style.display = 'none';
+        }
+        
+        // 检查登录状态
+        function checkLoginStatus() {
+            const token = localStorage.getItem('auth_token');
+            if (token) {
+                // 验证令牌有效性
+                fetch(`${API_BASE_PATH}/auth/me`, {
+                    headers: {
+                        'Authorization': `Bearer ${token}`
+                    }
+                })
+                .then(response => {
+                    if (response.ok) {
+                        // 令牌有效，跳转到仓位页面
+                        window.location.href = `${PAGE_BASE_PATH}/positions.html`;
+                    } else {
+                        // 令牌无效，清除本地存储
+                        localStorage.removeItem('auth_token');
+                        localStorage.removeItem('username');
+                        localStorage.removeItem('role');
+                    }
+                })
+                .catch(error => {
+                    console.error('验证令牌异常:', error);
+                });
+            }
+        }
+        
+        // 页面加载完成后检查登录状态
+        document.addEventListener('DOMContentLoaded', checkLoginStatus);
+    </script>
+</body>
+</html> 

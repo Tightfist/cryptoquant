@@ -30,13 +30,33 @@
         .ladder-progress {
             height: 10px;
         }
+        /* 用户信息样式 */
+        .user-info {
+            display: flex;
+            align-items: center;
+        }
+        .username {
+            margin-right: 10px;
+            font-weight: 600;
+        }
+        .role-badge {
+            font-size: 0.75rem;
+            padding: 3px 8px;
+            margin-right: 10px;
+        }
     </style>
 </head>
 <body>
     <div class="container mt-4">
         <div class="d-flex justify-content-between align-items-center mb-4">
             <h1>交易系统仓位管理</h1>
-            <div>
+            <div class="d-flex">
+                <!-- 用户信息 -->
+                <div class="user-info me-3">
+                    <span class="username" id="userDisplay">加载中...</span>
+                    <span class="badge bg-info role-badge" id="roleDisplay"></span>
+                    <button id="logoutBtn" class="btn btn-outline-secondary btn-sm">退出登录</button>
+                </div>
                 <button id="refreshBtn" class="btn btn-primary me-2">刷新数据</button>
                 <button id="closeAllBtn" class="btn btn-danger">一键平仓</button>
             </div>
@@ -156,7 +176,9 @@
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/js/bootstrap.bundle.min.js"></script>
     <script>
         // API基础路径
-        const API_BASE_PATH = '/webhook'; // 根据实际配置修改
+        const API_BASE_PATH = '/api'; // 根据实际配置修改
+        // 页面路径
+        const PAGE_BASE_PATH = '/static';
 
         // 当前选中的symbol
         let selectedSymbol = '';
@@ -165,8 +187,29 @@
         const closePositionModal = new bootstrap.Modal(document.getElementById('closePositionModal'));
         const closeAllModal = new bootstrap.Modal(document.getElementById('closeAllModal'));
         
+        // 认证相关变量
+        let authToken = '';
+        let currentUser = '';
+        let userRole = '';
+        
         // 页面加载完成后执行
         document.addEventListener('DOMContentLoaded', function() {
+            // 获取认证信息
+            authToken = localStorage.getItem('auth_token');
+            currentUser = localStorage.getItem('username');
+            userRole = localStorage.getItem('role');
+            
+            // 检查认证状态
+            if (!authToken) {
+                // 未登录，跳转到登录页面
+                window.location.href = `${PAGE_BASE_PATH}/login.html`;
+                return;
+            }
+            
+            // 显示用户信息
+            document.getElementById('userDisplay').textContent = currentUser || '未知用户';
+            document.getElementById('roleDisplay').textContent = userRole || '无角色';
+            
             // 加载数据
             loadOpenPositions();
             loadPositionHistory();
@@ -194,16 +237,45 @@
                 closeAllModal.hide();
             });
             
+            // 登出按钮事件
+            document.getElementById('logoutBtn').addEventListener('click', logout);
+            
             // 设置自动刷新（每30秒）
             setInterval(function() {
                 loadOpenPositions();
             }, 30000);
         });
         
+        // 带认证的Fetch请求
+        function fetchWithAuth(url, options = {}) {
+            // 设置认证头
+            const headers = options.headers || {};
+            headers['Authorization'] = `Bearer ${authToken}`;
+            
+            // 合并选项
+            const fetchOptions = {
+                ...options,
+                headers: headers
+            };
+            
+            return fetch(url, fetchOptions)
+                .then(response => {
+                    // 如果返回401未授权，则跳转到登录页面
+                    if (response.status === 401) {
+                        // 清除本地存储，重定向到登录页面
+                        localStorage.removeItem('auth_token');
+                        localStorage.removeItem('username');
+                        localStorage.removeItem('role');
+                        window.location.href = `${PAGE_BASE_PATH}/login.html`;
+                        return Promise.reject('未授权');
+                    }
+                    return response.json();
+                });
+        }
+        
         // 加载未平仓仓位
         function loadOpenPositions() {
-            fetch(`${API_BASE_PATH}/api/open_positions`)
-                .then(response => response.json())
+            fetchWithAuth(`${API_BASE_PATH}/open_positions`)
                 .then(data => {
                     if (data.success) {
                         renderOpenPositions(data.data);
@@ -219,8 +291,7 @@
         
         // 加载历史仓位
         function loadPositionHistory() {
-            fetch(`${API_BASE_PATH}/api/position_history`)
-                .then(response => response.json())
+            fetchWithAuth(`${API_BASE_PATH}/position_history`)
                 .then(data => {
                     console.log("历史仓位API返回数据:", data);
                     if (data.success) {
@@ -423,8 +494,7 @@
             const avgPnlPct = totalPnlPct / totalPositions;
             
             // 获取当日收益和胜率信息
-            fetch(`${API_BASE_PATH}/api/daily_pnl`)
-                .then(response => response.json())
+            fetchWithAuth(`${API_BASE_PATH}/daily_pnl`)
                 .then(data => {
                     if (data.success && data.data) {
                         const todayPnl = data.data.today_pnl || 0;
@@ -454,7 +524,7 @@
         
         // 平仓特定交易对
         function closePosition(symbol) {
-            fetch(`${API_BASE_PATH}/api/trigger`, {
+            fetchWithAuth(`${API_BASE_PATH}/trigger`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json'
@@ -464,7 +534,6 @@
                     symbol: symbol
                 })
             })
-            .then(response => response.json())
             .then(data => {
                 if (data.success) {
                     alert(`已成功平仓 ${symbol}`);
@@ -482,14 +551,13 @@
         
         // 平仓所有持仓
         function closeAllPositions() {
-            fetch(`${API_BASE_PATH}/api/close_all`, {
+            fetchWithAuth(`${API_BASE_PATH}/close_all`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json'
                 },
                 body: JSON.stringify({})
             })
-            .then(response => response.json())
             .then(data => {
                 if (data.success) {
                     alert('已成功平仓所有持仓');
@@ -521,6 +589,31 @@
             } else {
                 return `${Math.floor(diffSec/86400)}天${Math.floor((diffSec%86400)/3600)}小时`;
             }
+        }
+        
+        // 用户登出
+        function logout() {
+            fetchWithAuth(`${API_BASE_PATH}/auth/logout`, {
+                method: 'POST'
+            })
+            .then(data => {
+                // 清除本地存储
+                localStorage.removeItem('auth_token');
+                localStorage.removeItem('username');
+                localStorage.removeItem('role');
+                
+                // 重定向到登录页面
+                window.location.href = `${PAGE_BASE_PATH}/login.html`;
+            })
+            .catch(error => {
+                console.error('登出异常:', error);
+                
+                // 即使发生错误，也清除本地存储并重定向
+                localStorage.removeItem('auth_token');
+                localStorage.removeItem('username');
+                localStorage.removeItem('role');
+                window.location.href = `${PAGE_BASE_PATH}/login.html`;
+            });
         }
     </script>
 </body>
