@@ -440,7 +440,7 @@ class PositionManager:
         if self.risk_controller:
             self.risk_controller.update_daily_pnl(pnl_pct)
     
-    def check_risk_control(self, symbol: str, signal_extra_data: Optional[Dict[str, any]] = None) -> Tuple[bool, str]:
+    async def check_risk_control(self, symbol: str, signal_extra_data: Optional[Dict[str, any]] = None) -> Tuple[bool, str]:
         """
         检查风控条件
         
@@ -454,7 +454,7 @@ class PositionManager:
         if not self.risk_controller:
             return True, "未启用风控"
             
-        allowed, reason = self.risk_controller.check_risk_control(symbol, signal_extra_data)
+        allowed, reason = await self.risk_controller.check_risk_control(symbol, signal_extra_data)
         
         if allowed:
             self.logger.debug(f"{symbol} 风控检查通过: {reason}")

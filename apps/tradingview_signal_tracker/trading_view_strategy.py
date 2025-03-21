@@ -285,10 +285,9 @@ class TradingViewStrategy(BaseStrategy):
                 'signal_source': 'tradingview'
             }
             
-            # 添加风控参数
-            if risk_control:
-                extra_data['risk_control'] = risk_control
-                
+            # 无论是否为空，都添加风控参数到extra_data
+            extra_data['risk_control'] = risk_control
+            
             # 添加阶梯止盈参数
             if ladder_tp:
                 extra_data['ladder_tp'] = True

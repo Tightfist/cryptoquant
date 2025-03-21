@@ -1103,49 +1103,91 @@ class OKExDataCache(DataCache):
 
     async def get_contract_size(self, symbol: str) -> float:
         """
-        获取合约面值，优先从缓存获取，如果缓存不可用则从API获取
+        获取合约面值
         
         Args:
-            symbol: 合约ID
+            symbol: 合约代码
             
         Returns:
             float: 合约面值
         """
+        # 检查缓存
+        if symbol in self._contract_size_cache:
+            return self._contract_size_cache[symbol]
+            
+        # 确保有trader实例
+        if not self._direct_trader:
+            self._init_trader()
+            
+        # 如果初始化失败，返回默认值
+        if not self._direct_trader:
+            self.logger.warning(f"无法获取合约面值，使用默认值1: {symbol}")
+            return 1
+            
         try:
-            # 先从缓存获取
-            if symbol in self._contract_size_cache:
-                self.logger.debug(f"使用缓存中的合约面值: {symbol} = {self._contract_size_cache[symbol]}")
-                return self._contract_size_cache[symbol]
-                
-            # 缓存不可用，从API获取
-            self.logger.info(f"缓存中无法获取 {symbol} 合约面值，从API获取")
-            if not self._direct_trader:
-                self._init_trader()
-                
-            # 确保trader初始化成功
-            if not self._direct_trader:
-                raise Exception("无法初始化API调用器")
-                
             # 获取合约信息
             contract_info = self._direct_trader.get_contract_info(symbol, is_spot=False)
             
-            # 提取合约面值
             if contract_info and 'data' in contract_info and len(contract_info['data']) > 0:
                 ct_val = float(contract_info['data'][0].get('ctVal', 1))
-                self.logger.debug(f"获取合约面值成功: {symbol} = {ct_val}")
-                
-                # 存入缓存
+                # 缓存结果
                 self._contract_size_cache[symbol] = ct_val
                 return ct_val
             
-            # 如果获取失败，使用默认值并记录警告
+            # 如果获取失败，使用默认值
             self.logger.warning(f"无法获取合约面值，使用默认值1: {symbol}")
-            self._contract_size_cache[symbol] = 1
             return 1
         except Exception as e:
             self.logger.error(f"获取合约面值异常: {e}", exc_info=True)
-            # 出错时使用默认值但不缓存错误值
             return 1
+            
+    async def get_price_before(self, symbol: str, minutes_before: int = 15) -> float:
+        """
+        获取指定时间前的价格
+        
+        Args:
+            symbol: 合约代码
+            minutes_before: 前多少分钟，默认15分钟
+            
+        Returns:
+            float: 指定时间前的价格，如果无法获取则返回None
+        """
+        try:
+            # 获取当前K线数据
+            # 默认使用1m时间周期，确保能获取到精确的时间点价格
+            klines = await self.get_klines(symbol, timeframe="1m", limit=minutes_before + 5)
+            
+            if not klines or 'data' not in klines or not klines['data']:
+                self.logger.warning(f"无法获取 {symbol} 的K线数据")
+                return None
+                
+            # 找到对应时间的K线
+            # K线数据是按时间倒序排列的，最新的在前面
+            data = klines['data']
+            
+            # 检查是否有足够的数据点
+            if len(data) <= minutes_before:
+                self.logger.warning(f"K线数据不足，仅有 {len(data)} 条，需要 {minutes_before} 条")
+                # 如果没有足够的数据，使用最早的数据点
+                if data:
+                    last_kline = data[-1]
+                    # 使用收盘价作为价格参考
+                    return float(last_kline[4])  # 收盘价通常是第5列
+                return None
+                
+            # 获取指定分钟前的K线
+            target_kline = data[minutes_before]
+            
+            # 使用收盘价作为价格参考
+            if len(target_kline) >= 5:
+                price = float(target_kline[4])  # 收盘价通常是第5列
+                self.logger.debug(f"{symbol} {minutes_before}分钟前价格: {price}")
+                return price
+                
+            return None
+        except Exception as e:
+            self.logger.error(f"获取 {symbol} {minutes_before}分钟前价格异常: {e}")
+            return None
             
     def get_contract_size_sync(self, symbol: str) -> float:
         """

@@ -74,3 +74,6 @@ dev_notes.md
 .env.test.local
 .env.production.local
 .python-version 
+
+# 忽略apps下的scripts目录
+apps/*/scripts/ 

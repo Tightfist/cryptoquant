@@ -15,6 +15,7 @@ from abc import ABC, abstractmethod
 from typing import Dict, Any, List, Optional, Set, Tuple, Callable, Type
 from dataclasses import dataclass
 from enum import Enum, auto
+from datetime import datetime, timezone
 
 from src.common.position_manager import PositionManager, Position
 from src.common.data_cache import OKExDataCache
@@ -348,22 +349,14 @@ class BaseStrategy(ABC):
         # 创建开仓前置检查列表
         pre_checks = []
         
-        # 添加风控检查
-        if signal.extra_data and 'risk_control' in signal.extra_data:
-            # 获取24小时交易额
-            volume_24h = None
-            try:
-                volume_24h = await self.data_cache.get_volume_24h(signal.symbol)
-            except Exception as e:
-                self.logger.error(f"获取24小时交易额失败: {e}")
-            
-            # 进行风控检查
-            passed, reason = self.position_mgr.check_risk_control(signal.symbol, signal.extra_data, volume_24h)
-            if not passed:
-                return False, f"风控检查不通过: {reason}"
-            
-            # 只有通过了风控检查才记录交易
-            pre_checks.append("风控检查通过")
+        # 添加风控检查 - 无论是否有风控参数都进行检查
+        # 进行风控检查
+        passed, reason = await self.position_mgr.check_risk_control(signal.symbol, signal.extra_data)
+        if not passed:
+            return False, f"风控检查不通过: {reason}"
+        
+        # 只有通过了风控检查才记录交易
+        pre_checks.append("风控检查通过")
         
         # 设置合约类型
         is_spot = self.strategy_config.get('is_spot', False)
@@ -746,7 +739,11 @@ class BaseStrategy(ABC):
             # 检查是否有持仓
             if not self.positions:
                 return
-                
+            
+            # 计算总盈亏以更新风控系统
+            total_pnl_amount = 0
+            total_margin = 0
+
             # 获取当前价格信息
             for symbol, position in list(self.positions.items()):
                 # 跳过已平仓的持仓
@@ -785,6 +782,7 @@ class BaseStrategy(ABC):
                     
                     # 保证金 = 合约价值 / 杠杆倍数
                     margin = contract_value / position.leverage
+                    total_margin += margin
                     
                     # 原始盈亏金额（未考虑杠杆）
                     if direction == "long":
@@ -794,6 +792,7 @@ class BaseStrategy(ABC):
                     
                     # 实际盈亏金额（考虑杠杆）- 实际上是保证金 * 杠杆后的收益率
                     pnl_amount = margin * leveraged_pnl_pct
+                    total_pnl_amount += pnl_amount
                     
                     # 计算持仓时间 - 确保时间戳格式一致性
                     current_timestamp = int(time.time() * 1000)
@@ -925,6 +924,13 @@ class BaseStrategy(ABC):
                     
                 except Exception as e:
                     self.logger.error(f"监控持仓 {symbol} 发生异常: {e}")
+            
+            # 更新风控系统的盈亏数据
+            if total_margin > 0 and hasattr(self.position_mgr, 'update_risk_pnl'):
+                # 计算总盈亏百分比
+                total_pnl_pct = (total_pnl_amount / total_margin) * 100
+                self.position_mgr.update_risk_pnl(total_pnl_pct)
+                self.logger.debug(f"更新风控盈亏数据: 总盈亏={total_pnl_amount:.2f}USDT, 总保证金={total_margin:.2f}USDT, 盈亏率={total_pnl_pct:.2f}%")
                     
             self.logger.debug("持仓监控完成")
         except Exception as e:
@@ -1041,7 +1047,26 @@ class BaseStrategy(ABC):
                 
                 if close_result and close_result.get('code') == '0':
                     # 更新持仓数量
-                    position.quantity = position.quantity * (1 - close_pct_this_time)
+                    new_quantity = position.quantity * (1 - close_pct_this_time)
+                    
+                    # 圆整更新后的数量，避免浮点数精度问题
+                    try:
+                        # 保持原数量的正负号
+                        sign = 1 if new_quantity > 0 else -1
+                        abs_new_quantity = abs(new_quantity)
+                        
+                        # 使用相同的圆整逻辑
+                        abs_new_quantity = round(abs_new_quantity / lot_size) * lot_size
+                        abs_new_quantity = round(abs_new_quantity, precision)
+                        
+                        # 恢复正负号
+                        position.quantity = sign * abs_new_quantity
+                        
+                        self.logger.info(f"{symbol} 更新后的持仓数量圆整: 原始={new_quantity}, 圆整后={position.quantity}")
+                    except Exception as e:
+                        # 如果圆整失败，使用原始计算结果
+                        position.quantity = new_quantity
+                        self.logger.warning(f"圆整更新后的持仓数量失败，使用原始计算结果: {e}")
                     
                     # 记录平仓信息
                     self.logger.info(f"{symbol} 部分平仓成功，平仓数量: {close_quantity}, 剩余持仓: {abs(position.quantity)}")
@@ -1092,12 +1117,36 @@ class BaseStrategy(ABC):
             # 平仓方向与开仓相反
             side = "sell" if position.quantity > 0 else "buy"
             
+            # 处理数量精度，避免浮点数精度问题
+            close_quantity = abs(position.quantity)
+            
+            # 获取合约信息，用于圆整数量
+            try:
+                contract_info = self.trader.get_contract_info(symbol, False)["data"][0]
+                
+                # 获取最小交易单位
+                lot_size = float(contract_info['lotSz']) if 'lotSz' in contract_info else 1
+                
+                # 计算精度
+                if '.' in str(contract_info.get('lotSz', '1')):
+                    precision = str(contract_info['lotSz']).split('.')[1].find('1') + 1
+                else:
+                    precision = 0
+                
+                # 圆整平仓数量
+                close_quantity = round(close_quantity / lot_size) * lot_size
+                close_quantity = round(close_quantity, precision)
+                
+                self.logger.info(f"{symbol} 圆整平仓数量: 原始={abs(position.quantity)}, 圆整后={close_quantity}")
+            except Exception as e:
+                self.logger.warning(f"获取合约信息圆整数量失败，使用原始数量: {e}")
+            
             # 执行平仓 - 注意这里不使用await，因为swap_order不是异步方法
             close_result = self.trader.swap_order(
                 inst_id=symbol,
                 side=side,
                 pos_side=pos_side,
-                sz=abs(position.quantity)
+                sz=close_quantity
             )
             
             if not close_result or close_result.get("code") != "0":
@@ -1156,6 +1205,11 @@ class BaseStrategy(ABC):
                     position_id=position.position_id
                 )
                 self.logger.info(f"仓位已在数据库中标记为已平仓: {symbol}, position_id: {position.position_id}")
+                
+                # 通知风控系统平仓信息
+                if hasattr(self.position_mgr, 'risk_controller'):
+                    self.position_mgr.risk_controller.record_close_position(symbol)
+                    self.logger.debug(f"已通知风控系统平仓: {symbol}")
             except Exception as e:
                 self.logger.exception(f"更新数据库仓位状态异常: {e}")
             
@@ -1361,8 +1415,25 @@ class BaseStrategy(ABC):
         """
         初始化风控组件
         """
-        # 实现初始化风控组件的逻辑
-        pass
+        # 检查配置中是否包含风控配置
+        if 'risk_control' in self.config:
+            # 从配置中获取风控配置
+            risk_config = self.config.get('risk_control', {})
+            
+            # 配置风控组件
+            if hasattr(self.position_mgr, 'risk_controller'):
+                # 设置数据缓存引用
+                if hasattr(self.position_mgr.risk_controller, 'set_data_cache'):
+                    self.position_mgr.risk_controller.set_data_cache(self.data_cache)
+                    self.logger.info("已为风控组件设置数据缓存引用")
+                
+                # 配置风控组件
+                self.position_mgr.configure_risk_control(risk_config)
+                self.logger.info(f"已配置风控组件: {risk_config}")
+            else:
+                self.logger.warning("position_mgr 没有 risk_controller 属性，无法配置风控")
+        else:
+            self.logger.info("配置中未找到风控配置，使用默认风控参数")
 
     def initialize(self):
         """初始化策略"""
@@ -1377,8 +1448,10 @@ class BaseStrategy(ABC):
         
         # 同步风控系统中的持仓数量
         if hasattr(self.position_mgr, 'risk_controller') and self.positions:
-            self.position_mgr.risk_controller.set_positions_count(len(self.positions))
-            self.logger.info(f"初始化风控持仓数量: {len(self.positions)}")
+            # 只计算未关闭的仓位
+            active_positions_count = sum(1 for p in self.positions.values() if not getattr(p, 'closed', False))
+            self.position_mgr.risk_controller.set_positions_count(active_positions_count)
+            self.logger.info(f"初始化风控持仓数量: {active_positions_count}（总仓位数: {len(self.positions)}）")
             
         # 初始化子类
         self._init_strategy()
@@ -1455,40 +1528,77 @@ class TradingFramework:
         """
         return await self.strategy.process_signal(signal_data)
     
-    async def run_forever(self, position_monitor_interval: int = 30):
+    async def run_forever(self, position_monitor_interval: int = 30, restart_after_errors=True, max_errors=10, error_throttle_seconds=10):
         """
         运行框架的主循环
         
         Args:
             position_monitor_interval: 监控持仓的间隔时间（秒）
+            restart_after_errors(bool): 是否在错误后自动重启
+            max_errors(int): 最大错误次数，超过后不再重启
+            error_throttle_seconds(int): 错误后等待重启的秒数
         """
+        # 记录最后风控重置日期
+        last_reset_date = datetime.utcnow().date()
+        self.logger.info(f"初始化风控重置日期: {last_reset_date}")
+        
         self.logger.info(f"启动交易框架 {self.app_name}")
         
-        try:
-            # 启动市场数据订阅器并等待它初始化完成
-            self.logger.info("正在启动市场数据订阅器...")
-            started = await self.market_subscriber.start()
-            
-            if not started:
-                self.logger.error("市场数据订阅器启动失败，将继续尝试运行框架")
-            else:
-                self.logger.info("市场数据订阅器已启动成功")
-            
-            # 给WebSocket一些额外时间来稳定连接和收到初始数据
-            await asyncio.sleep(3)
-            
-            while True:
+        # 设置监控间隔
+        self.monitor_interval = position_monitor_interval
+        self.logger.info(f"持仓监控间隔: {position_monitor_interval}秒")
+        
+        error_count = 0
+        while True:
+            try:
+                # 检查是否需要重置日期计数器（UTC时间跨天）
+                current_date = datetime.utcnow().date()
+                if current_date > last_reset_date:
+                    self.logger.info(f"检测到日期变更: {last_reset_date} -> {current_date}, 重置风控每日计数器")
+                    if hasattr(self, 'position_mgr') and self.position_mgr and hasattr(self.position_mgr, 'reset_daily_risk_control'):
+                        await self.position_mgr.reset_daily_risk_control()
+                        self.logger.info(f"已重置风控每日计数器")
+                    else:
+                        self.logger.warning(f"无法重置风控每日计数器，position_mgr对象不存在或没有reset_daily_risk_control方法")
+                    last_reset_date = current_date
+                
+                # 启动行情订阅
+                if not getattr(self, 'market_data_subscriber_started', False):
+                    if hasattr(self, 'market_data_subscriber') and self.market_data_subscriber:
+                        await self.market_data_subscriber.start()
+                        self.market_data_subscriber_started = True
+                    
                 # 监控持仓
                 await self.strategy.monitor_positions()
                 
-                # 等待下一次监控
-                await asyncio.sleep(position_monitor_interval)
-        except asyncio.CancelledError:
-            self.logger.info("交易框架被取消")
-        except Exception as e:
-            self.logger.exception(f"交易框架异常: {e}")
-        finally:
-            self.logger.info("交易框架已停止")
+                # 休眠一段时间
+                await asyncio.sleep(self.monitor_interval)
+                
+            except KeyboardInterrupt:
+                self.logger.info("收到键盘中断信号，退出策略运行")
+                if getattr(self, 'market_data_subscriber_started', False) and hasattr(self, 'market_data_subscriber') and self.market_data_subscriber:
+                    await self.market_data_subscriber.stop()
+                break
+                
+            except Exception as e:
+                error_count += 1
+                self.logger.error(f"策略运行异常: {e}")
+                import traceback
+                self.logger.error(traceback.format_exc())
+                
+                # 如果达到最大错误次数，退出
+                if error_count >= max_errors:
+                    self.logger.error(f"达到最大错误次数 {max_errors}，退出策略运行")
+                    break
+                    
+                # 如果不自动重启，退出
+                if not restart_after_errors:
+                    self.logger.error("策略配置为不自动重启，退出策略运行")
+                    break
+                    
+                # 等待一段时间后重启
+                self.logger.info(f"等待 {error_throttle_seconds} 秒后重启策略")
+                await asyncio.sleep(error_throttle_seconds)
     
     async def manual_trigger(self, signal: TradeSignal) -> Tuple[bool, str]:
         """
