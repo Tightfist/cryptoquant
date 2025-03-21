@@ -5,7 +5,7 @@
 
 # 默认值
 DEFAULT_HOST="localhost"
-DEFAULT_PORT="80"
+DEFAULT_PORT="8080"
 DEFAULT_START_DATE=$(date -d "30 days ago" +%Y-%m-%d)
 DEFAULT_END_DATE=$(date +%Y-%m-%d)
 DEFAULT_LIMIT=100

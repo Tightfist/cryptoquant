@@ -5,7 +5,7 @@
 
 # 默认值
 DEFAULT_HOST="localhost"
-DEFAULT_PORT="80"
+DEFAULT_PORT="8080"
 
 # 显示用法信息
 function show_usage {

@@ -15,6 +15,7 @@ import sys
 import asyncio
 import logging
 import signal
+import time
 from pathlib import Path
 from typing import Dict, Any
 import json
@@ -31,15 +32,19 @@ from src.common.trading_framework import TradingFramework, TradeSignal
 from src.common.http.api_handlers import TradingFrameworkApiHandler
 from src.common.scripts.generate_api_scripts import generate_api_scripts
 from src.common.http.server import HttpServer
-
+from apps.tradingview_signal_tracker.routes import TradingViewWebhook
 from apps.tradingview_signal_tracker.trading_view_strategy import TradingViewStrategy
+from utils.env_loader import load_env, get_required_env, get_bool_env
 
 # 应用名称
 APP_NAME = "tradingview_signal_tracker"
 
 def main():
-    """主函数"""
+    """主程序入口"""
     try:
+        # 加载环境变量
+        load_env()
+        
         # 使用统一的配置加载函数
         config = get_app_config(APP_NAME)
 
@@ -48,10 +53,10 @@ def main():
         app.run()
     except KeyboardInterrupt:
         print("用户中断，程序退出")
+        raise
     except Exception as e:
-        print(f"程序异常: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"应用启动失败: {e}")
+        raise
 
 class TradingViewSignalApp:
     """TradingView信号追踪应用"""
@@ -75,6 +80,9 @@ class TradingViewSignalApp:
         )
         self.logger = logging.getLogger(self.app_name)
         
+        # 初始化HTTP服务器
+        self._init_http_server()
+
         # 初始化事件循环
         self.event_loop = AsyncEventLoop()
         
@@ -84,9 +92,6 @@ class TradingViewSignalApp:
             strategy_class=TradingViewStrategy,
             config=config
         )
-        
-        # 初始化HTTP服务器
-        self._init_http_server()
         
         # 注册信号处理
         self._register_signal_handlers()
@@ -103,7 +108,7 @@ class TradingViewSignalApp:
         if http_config is None:
             # 使用旧的webhook配置
             webhook_config = self.config.get('webhook', {})
-            self.port = webhook_config.get('port', 80)
+            self.port = webhook_config.get('port', 8080)
             self.host = webhook_config.get('host', '0.0.0.0')
             self.base_path = webhook_config.get('path', '/webhook')
             
@@ -133,7 +138,7 @@ class TradingViewSignalApp:
             # HTTP服务器会在异步任务中启动
             self.http_server = None
             
-            self.logger.info(f"使用新模式初始化HTTP服务器, 监听地址: {self.host}:{self.port}")
+            self.logger.info(f"使用新模式初始化HTTP服务器, 监听地址: {self.host}:{self.port}，服务正在启动中....")
             self._use_new_http_server = True
     
     async def _handle_webhook(self, data: Dict[str, Any], request):
@@ -221,51 +226,19 @@ class TradingViewSignalApp:
                 # 准备路由列表
                 routes = []
                 
-                # 添加Webhook路由
-                async def handle_webhook(request):
-                    try:
-                        # 获取请求内容类型
-                        content_type = request.headers.get('Content-Type', '')
-                        
-                        if 'application/json' in content_type:
-                            # JSON格式
-                            data = await request.json()
-                        else:
-                            # 文本格式
-                            text = await request.text()
-                            try:
-                                # 尝试解析为JSON
-                                data = json.loads(text)
-                            except json.JSONDecodeError:
-                                # 非JSON格式，作为文本处理
-                                data = {"text": text}
-                        
-                        # 处理信号
-                        success, message = await self.framework.process_signal(data)
-                        
-                        # 返回结果
-                        return web.json_response({
-                            "success": success,
-                            "message": message
-                        })
-                    except Exception as e:
-                        self.logger.exception(f"处理webhook异常: {e}")
-                        return web.json_response(
-                            {"success": False, "message": f"处理异常: {e}"},
-                            status=500
-                        )
-                
+                # webhook接口
+                webhook_handler = TradingViewWebhook(self.framework)
                 # 添加Webhook路由
                 webhook_path = f"{self.base_path}" if self.base_path.endswith('/') else f"{self.base_path}/"
-                routes.append(('POST', webhook_path, handle_webhook))
+                routes.append(('POST', webhook_path, webhook_handler.handle_webhook))
                 
                 # 同时注册不带斜杠的路由
                 webhook_path_no_slash = self.base_path.rstrip('/')
-                routes.append(('POST', webhook_path_no_slash, handle_webhook))
+                routes.append(('POST', webhook_path_no_slash, webhook_handler.handle_webhook))
                 self.logger.warning(f"同时注册两个webhook路径: POST {webhook_path} 和 POST {webhook_path_no_slash}")
                 
                 # 获取API路由
-                for route in api_handler.get_routes(self.base_path):
+                for route in api_handler.get_routes():
                     routes.append(route)
                 
                 # 获取静态文件目录
@@ -277,14 +250,6 @@ class TradingViewSignalApp:
                 
                 # 从module导入run_http_server
                 from src.common.http.server import run_http_server
-                
-                # 添加测试路由
-                async def test_handler(request):
-                    self.logger.warning(f"测试路由收到请求: {request.method} {request.url}")
-                    return web.json_response({"status": "ok", "message": "测试路由正常"})
-                
-                routes.append(('GET', '/test', test_handler))
-                routes.append(('POST', '/test', test_handler))
                 self.logger.warning("添加测试路由: GET/POST /test")
                 
                 # 启动HTTP服务器
@@ -294,7 +259,7 @@ class TradingViewSignalApp:
                         port=self.port,
                         routes=routes,
                         static_dir=static_dir,
-                        static_path=f"{self.base_path}/static",
+                        static_path="/static",
                         cors_origins=cors_origins,
                         logger=self.logger
                     )
