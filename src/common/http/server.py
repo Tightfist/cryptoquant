@@ -338,9 +338,6 @@ def create_http_server(
         app.router.add_get('/', default_handler)
         logger.info("注册默认路由: GET / -> /static/login.html")
 
-        for route in app.router.routes():
-            print(route.method, route.resource)
-
         return app
         
     except Exception as e:

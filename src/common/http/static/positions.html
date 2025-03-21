@@ -113,6 +113,7 @@
                 <table class="table table-striped table-hover">
                     <thead>
                         <tr>
+                            <th>序号</th>
                             <th>平仓时间</th>
                             <th>交易对</th>
                             <th>方向</th>
@@ -126,7 +127,7 @@
                     </thead>
                     <tbody id="historyTableBody">
                         <tr>
-                            <td colspan="9" class="text-center">加载中...</td>
+                            <td colspan="10" class="text-center">加载中...</td>
                         </tr>
                     </tbody>
                 </table>
@@ -350,8 +351,8 @@
                                 <div>${position.current_price || '未知'}</div>
                             </div>
                             <div class="d-flex justify-content-between mb-3">
-                                <div>数量:</div>
-                                <div>${position.quantity}</div>
+                                <div>保证金(USDT):</div>
+                                <div>${position.margin ? position.margin.toFixed(2) : '0.00'}</div>
                             </div>
                             <div class="d-flex justify-content-between mb-3">
                                 <div>杠杆:</div>
@@ -359,11 +360,11 @@
                             </div>
                             <div class="d-flex justify-content-between mb-3">
                                 <div>止盈价:</div>
-                                <div>${typeof position.take_profit_price === 'number' ? position.take_profit_price.toFixed(4) : '未设置'}</div>
+                                <div>${typeof position.take_profit_price === 'number' && position.take_profit_price > 0 ? position.take_profit_price.toFixed(4) : '未设置'}</div>
                             </div>
                             <div class="d-flex justify-content-between mb-3">
                                 <div>止损价:</div>
-                                <div>${typeof position.stop_loss_price === 'number' ? position.stop_loss_price.toFixed(4) : '未设置'}</div>
+                                <div>${typeof position.stop_loss_price === 'number' && position.stop_loss_price > 0 ? position.stop_loss_price.toFixed(4) : '未设置'}</div>
                             </div>
                             <div class="d-flex justify-content-between mb-3">
                                 <div>阶梯止盈:</div>
@@ -403,16 +404,20 @@
             const tableBody = document.getElementById('historyTableBody');
             
             if (!positions || positions.length === 0) {
-                tableBody.innerHTML = '<tr><td colspan="9" class="text-center">没有历史仓位数据</td></tr>';
+                tableBody.innerHTML = '<tr><td colspan="10" class="text-center">没有历史仓位数据</td></tr>';
                 return;
             }
             
             let html = '';
             
-            positions.forEach(position => {
+            // 对仓位按照平仓时间倒序排序（最新的在前面）
+            positions.sort((a, b) => (b.exit_timestamp || 0) - (a.exit_timestamp || 0));
+            
+            positions.forEach((position, index) => {
                 // 确保只处理已平仓的仓位
                 if (!position.closed && position.exit_timestamp <= 0) return;
                 
+                const sequenceNumber = positions.length - index; // 最新的仓位序号最大
                 const pnlClass = position.pnl_amount >= 0 ? 'profit' : 'loss';
                 const pnlAmount = position.pnl_amount ? position.pnl_amount.toFixed(2) : '0.00';
                 const pnlPercentage = position.pnl_percentage ? position.pnl_percentage.toFixed(2) : '0.00';
@@ -422,6 +427,7 @@
                 
                 html += `
                 <tr>
+                    <td>#${sequenceNumber}</td>
                     <td>${exitTimeStr}</td>
                     <td>${position.symbol}</td>
                     <td>${directionText}</td>
@@ -435,7 +441,7 @@
             });
             
             if (html === '') {
-                tableBody.innerHTML = '<tr><td colspan="9" class="text-center">没有历史仓位数据</td></tr>';
+                tableBody.innerHTML = '<tr><td colspan="10" class="text-center">没有历史仓位数据</td></tr>';
             } else {
                 tableBody.innerHTML = html;
             }
@@ -446,8 +452,28 @@
             if (!positions || positions.length === 0) {
                 document.getElementById('totalPositions').textContent = '0';
                 document.getElementById('totalPnl').textContent = '0.00 USDT (0.00%)';
-                document.getElementById('todayPnl').textContent = '0.00 USDT';
-                document.getElementById('winRate').textContent = '0.00%';
+                
+                // 获取当日收益和胜率信息，即使没有持仓也需要获取
+                fetch(`${API_BASE_PATH}/api/daily_pnl`)
+                    .then(response => response.json())
+                    .then(data => {
+                        if (data.success && data.data) {
+                            const todayPnl = data.data.today_pnl || 0;
+                            document.getElementById('todayPnl').textContent = todayPnl.toFixed(2) + ' USDT';
+                            document.getElementById('todayPnl').className = todayPnl >= 0 ? 'card-text profit' : 'card-text loss';
+                            
+                            const winRate = data.data.win_rate || 0;
+                            document.getElementById('winRate').textContent = winRate.toFixed(2) + '%';
+                        } else {
+                            document.getElementById('todayPnl').textContent = '0.00 USDT';
+                            document.getElementById('winRate').textContent = '0.00%';
+                        }
+                    })
+                    .catch(error => {
+                        console.error('获取日盈亏数据失败:', error);
+                        document.getElementById('todayPnl').textContent = '0.00 USDT';
+                        document.getElementById('winRate').textContent = '0.00%';
+                    });
                 return;
             }
             
@@ -478,6 +504,9 @@
                         
                         const winRate = data.data.win_rate || 0;
                         document.getElementById('winRate').textContent = winRate.toFixed(2) + '%';
+                    } else {
+                        document.getElementById('todayPnl').textContent = '0.00 USDT';
+                        document.getElementById('winRate').textContent = '0.00%';
                     }
                 })
                 .catch(error => {

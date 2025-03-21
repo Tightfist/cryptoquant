@@ -9,18 +9,13 @@
     "enabled": true,
     "host": "0.0.0.0",
     "port": 8080,
-    "base_path": "/webhook",
-    "ssl": {
-      "enabled": false,
-      "cert_file": "/path/to/your/certificate.crt",
-      "key_file": "/path/to/your/private.key"
-    }
+    "base_path": "/webhook"
   },
   "strategy": {
     "leverage": 18,
     "per_position_usdt": 100,
     "take_profit_pct": 0.055,
-    "stop_loss_pct": 0.015,
+    "stop_loss_pct": 0.013,
     "trailing_stop": true,
     "trailing_distance": 0.0185,
     "unit_type": "quote",
@@ -41,7 +36,7 @@
   "risk_control": {
       "enable_cooling_period": false,
       "cooling_period_minutes": 30,
-      "enable_daily_limit": false,
+      "enable_daily_limit": true,
       "max_daily_trades": 50,
       "enable_loss_limit": false,
       "max_daily_loss_pct": 50.0,

@@ -72,23 +72,17 @@ class TradingViewStrategy(BaseStrategy):
             # 找到USDT的位置
             usdt_pos = symbol.find("USDT")
             if usdt_pos > 0:
-                # 分离币种名称
+                # 分离币种名称，保留原始形式（包括数字和特殊字符）
                 coin = symbol[:usdt_pos]
+                self.logger.info(f"转换合约名称: {symbol} -> {coin}-USDT-SWAP")
                 return f"{coin}-USDT-SWAP"
             
         # 尝试使用正则表达式进行转换
         # 例如：将 BTCUSDT.P 或 SWARMSUSDT.P 转换为 BTC-USDT-SWAP 或 SWARMS-USDT-SWAP
-        match = re.match(r"([A-Z]+)USDT\.P", symbol)
+        match = re.match(r"([A-Za-z0-9]+)USDT\.P", symbol)
         if match:
             coin = match.group(1)
             return f"{coin}-USDT-SWAP"
-            
-        # 尝试提取所有大写字母作为币种名称
-        match = re.match(r"([A-Z]+)", symbol)
-        if match:
-            coin = match.group(1)
-            if "USDT" in symbol:
-                return f"{coin}-USDT-SWAP"
                 
         # 如果无法转换，记录警告并返回一个可能的格式
         self.logger.warning(f"无法精确转换合约名称: {symbol}，尝试使用通用格式")
