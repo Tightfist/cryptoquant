@@ -127,8 +127,9 @@ class RiskController:
         Args:
             count: 当前持仓数量
         """
+        old_count = self.current_positions_count
         self.current_positions_count = count
-        self.logger.debug(f"更新当前持仓数量: {count}")
+        self.logger.info(f"手动更新持仓数量: {old_count} -> {count}")
     
     def record_trade(self, symbol: str) -> None:
         """
@@ -142,22 +143,26 @@ class RiskController:
         # 增加交易计数
         self.daily_trades_count += 1
         # 增加持仓计数
+        old_count = self.current_positions_count
         self.current_positions_count += 1
         
-        self.logger.info(f"记录交易: {symbol}, 当日第{self.daily_trades_count}笔, 当前持仓数: {self.current_positions_count}")
+        self.logger.info(f"记录交易: {symbol}, 当日第{self.daily_trades_count}笔, 当前持仓数: {old_count} -> {self.current_positions_count}")
     
-    def record_close_position(self, symbol: str) -> None:
+    def record_close_position(self, symbol: str, is_partial_close: bool = False) -> None:
         """
         记录平仓信息
         
         Args:
             symbol: 交易标的
+            is_partial_close: 是否部分平仓，为True时不减少持仓计数
         """
-        # 减少持仓计数
-        if self.current_positions_count > 0:
+        # 只有在完全平仓时才减少持仓计数
+        old_count = self.current_positions_count
+        if not is_partial_close and self.current_positions_count > 0:
             self.current_positions_count -= 1
-        
-        self.logger.info(f"记录平仓: {symbol}, 当前持仓数: {self.current_positions_count}")
+            self.logger.info(f"记录平仓: {symbol}, 当前持仓数: {old_count} -> {self.current_positions_count}")
+        else:
+            self.logger.info(f"记录部分平仓: {symbol}, 持仓数保持不变: {old_count}")
     
     async def check_price_change(self, symbol: str, risk_params: Optional[Dict[str, Any]] = None) -> Tuple[bool, str]:
         """
@@ -270,7 +275,9 @@ class RiskController:
         # 检查最大持仓数
         if risk_params.get('enable_max_positions', self.enable_max_positions):
             max_positions = risk_params.get('max_positions', self.max_positions)
+            self.logger.info(f"检查最大持仓风控: 当前持仓 {self.current_positions_count}/{max_positions} 个")
             if self.current_positions_count >= max_positions:
+                self.logger.warning(f"达到最大持仓数限制: {max_positions}个，当前持仓: {self.current_positions_count}个")
                 return False, f"达到最大持仓数限制: {max_positions}个，当前持仓: {self.current_positions_count}个"
         
         # 检查日交易上限
@@ -300,13 +307,19 @@ class RiskController:
         Returns:
             Tuple[bool, str]: (是否允许, 原因)
         """
+        self.logger.info(f"执行风控检查: {symbol}, 当前持仓数: {self.current_positions_count}")
+        
         # 如果信号中没有包含风控信息，使用默认风控配置而不是直接允许交易
         if not signal_extra_data or 'risk_control' not in signal_extra_data:
             # 使用空的风控参数，这会导致内部方法使用默认配置
             risk_params = {}
+            self.logger.debug(f"使用默认风控参数, 最大持仓数: {self.max_positions}, 开关状态: {self.enable_max_positions}")
         else:
             # 获取风控参数
             risk_params = signal_extra_data.get('risk_control', {})
+            max_positions = risk_params.get('max_positions', self.max_positions)
+            enable_max_positions = risk_params.get('enable_max_positions', self.enable_max_positions)
+            self.logger.debug(f"使用信号风控参数, 最大持仓数: {max_positions}, 开关状态: {enable_max_positions}")
         
         # 检查全局交易限制
         allowed, reason = await self.check_trade_allowed(symbol, risk_params)

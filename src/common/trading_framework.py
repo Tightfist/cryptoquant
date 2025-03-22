@@ -419,6 +419,9 @@ class BaseStrategy(ABC):
         trailing_stop = signal.trailing_stop if signal.trailing_stop is not None else self.trailing_stop
         trailing_distance = signal.trailing_distance if signal.trailing_distance is not None else self.trailing_distance
         
+        # 记录原始止盈止损比例
+        self.logger.info(f"【开仓】{signal.symbol} 原始止盈止损比例: 止盈={take_profit_pct*100:.2f}%, 止损={stop_loss_pct*100:.2f}%")
+        
         # 检查信号中是否包含阶梯止盈设置
         if signal.extra_data and 'ladder_tp' in signal.extra_data:
             ladder_tp = signal.extra_data['ladder_tp']
@@ -444,7 +447,18 @@ class BaseStrategy(ABC):
             # 调整止盈止损比例（除以杠杆倍数）
             take_profit_pct = take_profit_pct / leverage
             stop_loss_pct = stop_loss_pct / leverage
-        
+            self.logger.info(f"【开仓】{signal.symbol} 杠杆调整后止盈止损比例: 止盈={take_profit_pct*100:.2f}%, 止损={stop_loss_pct*100:.2f}%")
+            
+            # 计算实际止盈止损价格和触发方向
+            if signal.direction == "long":
+                tp_price = signal.entry_price * (1 + take_profit_pct)
+                sl_price = signal.entry_price * (1 - stop_loss_pct)
+                self.logger.info(f"【开仓】{signal.symbol} 多头止盈止损价格: 入场={signal.entry_price:.4f}, 止盈={tp_price:.4f}, 止损={sl_price:.4f}")
+            else:
+                tp_price = signal.entry_price * (1 - take_profit_pct)
+                sl_price = signal.entry_price * (1 + stop_loss_pct)
+                self.logger.info(f"【开仓】{signal.symbol} 空头止盈止损价格: 入场={signal.entry_price:.4f}, 止盈={tp_price:.4f}, 止损={sl_price:.4f}")
+                
         self.update_strategy_status(StrategyStatus.OPENING_POSITION, f"开仓: {signal.symbol} {side}")
         
         # 设置杠杆
@@ -828,6 +842,10 @@ class BaseStrategy(ABC):
                     signal = position.signal
                     take_profit_pct = signal.take_profit_pct if signal and hasattr(signal, 'take_profit_pct') and signal.take_profit_pct is not None else self.take_profit_pct
                     stop_loss_pct = signal.stop_loss_pct if signal and hasattr(signal, 'stop_loss_pct') and signal.stop_loss_pct is not None else self.stop_loss_pct
+                    
+                    # 添加诊断日志 - 调整前的原始止盈止损比例
+                    self.logger.info(f"【诊断】{symbol} 调整前的原始止盈止损百分比: 止盈={take_profit_pct*100:.2f}%, 止损={stop_loss_pct*100:.2f}%")
+                    
                     trailing_stop = signal.trailing_stop if signal and hasattr(signal, 'trailing_stop') and signal.trailing_stop is not None else self.trailing_stop
                     trailing_distance = signal.trailing_distance if signal and hasattr(signal, 'trailing_distance') and signal.trailing_distance is not None else self.trailing_distance
                     
@@ -845,8 +863,24 @@ class BaseStrategy(ABC):
                             self.logger.info(f"{symbol} 创新高: {mark_price}")
                         
                         # 计算止盈价和止损价
-                        take_profit_price = position.entry_price * (1 + take_profit_pct)
-                        stop_loss_price = position.entry_price * (1 - stop_loss_pct)
+                        take_profit_price_no_adj = position.entry_price * (1 + take_profit_pct)
+                        stop_loss_price_no_adj = position.entry_price * (1 - stop_loss_pct)
+                        
+                        # 添加诊断日志 - 未调整杠杆的止盈止损价格
+                        self.logger.info(f"【诊断】{symbol} 未调整杠杆的止盈止损价格: 止盈={take_profit_price_no_adj:.4f}, 止损={stop_loss_price_no_adj:.4f}")
+                        
+                        # 如果有杠杆，调整百分比
+                        if position.leverage > 1:
+                            adj_take_profit_pct = take_profit_pct / position.leverage
+                            adj_stop_loss_pct = stop_loss_pct / position.leverage
+                            self.logger.info(f"【诊断】{symbol} 调整后的止盈止损百分比: 止盈={adj_take_profit_pct*100:.2f}%, 止损={adj_stop_loss_pct*100:.2f}%")
+                            
+                            # 使用调整后的百分比计算价格
+                            take_profit_price = position.entry_price * (1 + adj_take_profit_pct)
+                            stop_loss_price = position.entry_price * (1 - adj_stop_loss_pct)
+                        else:
+                            take_profit_price = take_profit_price_no_adj
+                            stop_loss_price = stop_loss_price_no_adj
                         
                         # 如果开启了追踪止损，计算追踪止损价格
                         trailing_stop_price = None
@@ -863,8 +897,24 @@ class BaseStrategy(ABC):
                             self.logger.info(f"{symbol} 创新低: {mark_price}")
                         
                         # 计算止盈价和止损价
-                        take_profit_price = position.entry_price * (1 - take_profit_pct)
-                        stop_loss_price = position.entry_price * (1 + stop_loss_pct)
+                        take_profit_price_no_adj = position.entry_price * (1 - take_profit_pct)
+                        stop_loss_price_no_adj = position.entry_price * (1 + stop_loss_pct)
+                        
+                        # 添加诊断日志 - 未调整杠杆的止盈止损价格
+                        self.logger.info(f"【诊断】{symbol} 未调整杠杆的止盈止损价格: 止盈={take_profit_price_no_adj:.4f}, 止损={stop_loss_price_no_adj:.4f}")
+                        
+                        # 如果有杠杆，调整百分比
+                        if position.leverage > 1:
+                            adj_take_profit_pct = take_profit_pct / position.leverage
+                            adj_stop_loss_pct = stop_loss_pct / position.leverage
+                            self.logger.info(f"【诊断】{symbol} 调整后的止盈止损百分比: 止盈={adj_take_profit_pct*100:.2f}%, 止损={adj_stop_loss_pct*100:.2f}%")
+                            
+                            # 使用调整后的百分比计算价格
+                            take_profit_price = position.entry_price * (1 - adj_take_profit_pct)
+                            stop_loss_price = position.entry_price * (1 + adj_stop_loss_pct)
+                        else:
+                            take_profit_price = take_profit_price_no_adj
+                            stop_loss_price = stop_loss_price_no_adj
                         
                         # 如果开启了追踪止损，计算追踪止损价格
                         trailing_stop_price = None
@@ -874,6 +924,9 @@ class BaseStrategy(ABC):
                             if trailing_stop_price < stop_loss_price:
                                 stop_loss_price = trailing_stop_price
                                 self.logger.debug(f"{symbol} 空头追踪止损价格: {stop_loss_price}")
+                    
+                    # 添加诊断日志 - 最终止盈止损价格
+                    self.logger.info(f"【诊断】{symbol} 最终止盈止损价格: 止盈={take_profit_price:.4f}, 止损={stop_loss_price:.4f}")
                     
                     # 计算距离止盈和止损的百分比
                     distance_to_tp_pct = abs((take_profit_price - mark_price) / mark_price)
@@ -958,6 +1011,9 @@ class BaseStrategy(ABC):
         # 确保position有direction属性
         if not hasattr(position, 'direction') or position.direction is None:
             position.direction = "long" if position.quantity > 0 else "short"
+        
+        # 添加debug日志，显示止盈止损价格
+        self.logger.info(f"【止盈止损检查】{symbol} 当前价格: {mark_price:.4f}, 止盈价: {take_profit_price:.4f}, 止损价: {stop_loss_price:.4f}")
         
         # 检查是否需要止损
         if position.direction == 'long' and mark_price <= stop_loss_price:
@@ -1068,8 +1124,38 @@ class BaseStrategy(ABC):
                         position.quantity = new_quantity
                         self.logger.warning(f"圆整更新后的持仓数量失败，使用原始计算结果: {e}")
                     
+                    # 获取必要的变量
+                    # 合约面值
+                    contract_size = self.get_contract_size_sync(symbol)
+                    
+                    # 计算杠杆后的盈亏百分比 - 这个变量在当前函数中并没有定义，所以需要重新计算
+                    if position.direction == 'long':
+                        leveraged_pnl_pct = (mark_price - position.entry_price) / position.entry_price * position.leverage
+                    else:  # short
+                        leveraged_pnl_pct = (position.entry_price - mark_price) / position.entry_price * position.leverage
+                    
+                    # 计算部分平仓收益
+                    # 合约价值 = 数量 * 入场价格 * 合约面值
+                    closed_contract_value = close_quantity * position.entry_price * contract_size
+                    # 保证金 = 合约价值 / 杠杆倍数
+                    closed_margin = closed_contract_value / position.leverage
+                    # 实际盈亏金额（考虑杠杆）
+                    closed_pnl = closed_margin * leveraged_pnl_pct
+                    
                     # 记录平仓信息
                     self.logger.info(f"{symbol} 部分平仓成功，平仓数量: {close_quantity}, 剩余持仓: {abs(position.quantity)}")
+                    self.logger.info(f"{symbol} 部分平仓收益: {closed_pnl:.2f} USDT ({leveraged_pnl_pct*100:.2f}%)")
+                    
+                    # 累计已实现收益 - 如果属性不存在则初始化为0
+                    if not hasattr(position, 'realized_pnl'):
+                        position.realized_pnl = 0.0
+                    position.realized_pnl += closed_pnl
+                    self.logger.info(f"{symbol} 累计已实现收益: {position.realized_pnl:.2f} USDT")
+                    
+                    # 通知风控系统部分平仓信息
+                    if hasattr(self.position_mgr, 'risk_controller'):
+                        self.position_mgr.risk_controller.record_close_position(symbol, is_partial_close=True)
+                        self.logger.debug(f"已通知风控系统部分平仓: {symbol}")
                     
                     # 检查是否已全部平仓
                     if abs(position.quantity) < 0.0001 or target_closed_pct >= 0.9999:
@@ -1077,6 +1163,11 @@ class BaseStrategy(ABC):
                         position.closed = True
                         self.position_mgr.save_position(position)
                         self.positions.pop(symbol, None)
+                        
+                        # 通知风控系统完全平仓 (确保计数器正确更新)
+                        if hasattr(self.position_mgr, 'risk_controller'):
+                            self.position_mgr.risk_controller.record_close_position(symbol, is_partial_close=False)
+                            self.logger.debug(f"已通知风控系统完全平仓: {symbol}")
                     else:
                         # 更新持仓数据库
                         self.position_mgr.save_position(position)
@@ -1208,7 +1299,7 @@ class BaseStrategy(ABC):
                 
                 # 通知风控系统平仓信息
                 if hasattr(self.position_mgr, 'risk_controller'):
-                    self.position_mgr.risk_controller.record_close_position(symbol)
+                    self.position_mgr.risk_controller.record_close_position(symbol, is_partial_close=False)
                     self.logger.debug(f"已通知风控系统平仓: {symbol}")
             except Exception as e:
                 self.logger.exception(f"更新数据库仓位状态异常: {e}")
@@ -1501,6 +1592,19 @@ class TradingFramework:
         
         # 处理策略中等待的订阅请求
         self.strategy._process_pending_subscriptions()
+        
+        # 初始化风控系统的持仓数量
+        if hasattr(self.position_mgr, 'risk_controller'):
+            # 计算实际活跃仓位数量
+            active_positions = sum(1 for p in self.strategy.positions.values() if not getattr(p, 'closed', False))
+            # 设置风控系统中的持仓数量
+            self.position_mgr.risk_controller.set_positions_count(active_positions)
+            self.logger.info(f"初始化风控持仓数量: {active_positions}（总仓位数: {len(self.strategy.positions)}）")
+            
+            # 确保风控系统有数据缓存的引用
+            if hasattr(self.position_mgr.risk_controller, 'set_data_cache'):
+                self.position_mgr.risk_controller.set_data_cache(self.data_cache)
+                self.logger.info("已为风控系统设置数据缓存引用")
     
     def _subscribe_market_data(self, symbol: str):
         """
@@ -1555,11 +1659,15 @@ class TradingFramework:
                 current_date = datetime.utcnow().date()
                 if current_date > last_reset_date:
                     self.logger.info(f"检测到日期变更: {last_reset_date} -> {current_date}, 重置风控每日计数器")
-                    if hasattr(self, 'position_mgr') and self.position_mgr and hasattr(self.position_mgr, 'reset_daily_risk_control'):
-                        await self.position_mgr.reset_daily_risk_control()
-                        self.logger.info(f"已重置风控每日计数器")
+                    if hasattr(self.position_mgr, 'risk_controller'):
+                        # 重置每日计数器，但保留持仓数
+                        current_positions = self.position_mgr.risk_controller.current_positions_count
+                        self.position_mgr.risk_controller.reset_daily_counters()
+                        # 确保持仓数保持不变
+                        self.position_mgr.risk_controller.set_positions_count(current_positions)
+                        self.logger.info(f"已重置风控每日计数器，保留持仓数: {current_positions}")
                     else:
-                        self.logger.warning(f"无法重置风控每日计数器，position_mgr对象不存在或没有reset_daily_risk_control方法")
+                        self.logger.warning(f"无法重置风控每日计数器，risk_controller不存在")
                     last_reset_date = current_date
                 
                 # 启动行情订阅
@@ -1648,6 +1756,71 @@ class TradingFramework:
                     'trailing_distance': position.signal.trailing_distance
                 }
             
+            # 获取当前市场价格计算最新的未实现盈亏
+            try:
+                mark_price = self.data_cache.get_mark_price_sync(symbol)
+                contract_size = self.strategy.get_contract_size_sync(symbol)
+                
+                # 计算盈亏百分比 - 不考虑杠杆
+                if position.direction == "long":
+                    pnl_pct = (mark_price - position.entry_price) / position.entry_price
+                else:  # short
+                    pnl_pct = (position.entry_price - mark_price) / position.entry_price
+                
+                # 计算带杠杆的盈亏百分比
+                leveraged_pnl_pct = pnl_pct * position.leverage
+                
+                # 计算盈亏金额
+                # 合约价值 = 数量 * 入场价格 * 合约面值
+                contract_value = abs(position.quantity) * position.entry_price * contract_size
+                
+                # 保证金 = 合约价值 / 杠杆倍数
+                margin = contract_value / position.leverage
+                
+                # 实际盈亏金额（考虑杠杆）
+                pnl_amount = margin * leveraged_pnl_pct
+                
+                # 获取已实现盈亏
+                realized_pnl = getattr(position, 'realized_pnl', 0.0)
+                
+                # 计算总收益（未实现+已实现）
+                total_pnl = pnl_amount + realized_pnl
+                
+                # 计算止盈止损价格 - 获取止盈止损百分比
+                signal = position.signal if hasattr(position, 'signal') else None
+                take_profit_pct = signal.take_profit_pct if signal and hasattr(signal, 'take_profit_pct') and signal.take_profit_pct is not None else self.strategy.take_profit_pct
+                stop_loss_pct = signal.stop_loss_pct if signal and hasattr(signal, 'stop_loss_pct') and signal.stop_loss_pct is not None else self.strategy.stop_loss_pct
+                
+                # 记录原始止盈止损比例 (Web界面计算)
+                self.logger.info(f"【Web界面】{symbol} 原始止盈止损比例: 止盈={take_profit_pct*100:.2f}%, 止损={stop_loss_pct*100:.2f}%")
+                
+                # 如果有杠杆，调整百分比（与开仓逻辑一致）
+                if position.leverage > 1:
+                    take_profit_pct = take_profit_pct / position.leverage
+                    stop_loss_pct = stop_loss_pct / position.leverage
+                    self.logger.info(f"【Web界面】{symbol} 杠杆调整后止盈止损比例: 止盈={take_profit_pct*100:.2f}%, 止损={stop_loss_pct*100:.2f}%")
+                
+                # 计算实际止盈止损价格
+                if position.direction == "long":
+                    take_profit_price = position.entry_price * (1 + take_profit_pct)
+                    stop_loss_price = position.entry_price * (1 - stop_loss_pct)
+                else:  # short
+                    take_profit_price = position.entry_price * (1 - take_profit_pct)
+                    stop_loss_price = position.entry_price * (1 + stop_loss_pct)
+                
+                self.logger.info(f"【Web界面】{symbol} 计算的止盈止损价格: 入场={position.entry_price:.4f}, 止盈={take_profit_price:.4f}, 止损={stop_loss_price:.4f}")
+                
+                # 更新计算的PnL数据
+                current_price = mark_price
+                unrealized_pnl = pnl_amount
+            except Exception as e:
+                self.logger.warning(f"计算{symbol}盈亏异常: {e}")
+                current_price = 0
+                unrealized_pnl = 0
+                total_pnl = getattr(position, 'realized_pnl', 0.0)
+                take_profit_price = 0
+                stop_loss_price = 0
+            
             # 添加持仓信息
             pos_data = {
                 'symbol': symbol,
@@ -1664,6 +1837,14 @@ class TradingFramework:
                 'ladder_tp_pct': position.ladder_tp_pct if hasattr(position, 'ladder_tp_pct') else 0,
                 'ladder_tp_step': position.ladder_tp_step if hasattr(position, 'ladder_tp_step') else 0,
                 'ladder_closed_pct': position.ladder_closed_pct if hasattr(position, 'ladder_closed_pct') else 0,
+                'realized_pnl': position.realized_pnl if hasattr(position, 'realized_pnl') else 0,
+                'unrealized_pnl': unrealized_pnl,
+                'pnl_amount': unrealized_pnl,
+                'total_pnl': total_pnl,
+                'current_price': current_price,
+                'leveraged_pnl_pct': leveraged_pnl_pct if 'leveraged_pnl_pct' in locals() else 0,
+                'take_profit_price': take_profit_price if 'take_profit_price' in locals() else 0,
+                'stop_loss_price': stop_loss_price if 'stop_loss_price' in locals() else 0,
                 'signal': signal_info
             }
             positions_list.append(pos_data)

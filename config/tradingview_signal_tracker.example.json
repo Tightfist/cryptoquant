@@ -14,10 +14,10 @@
   "strategy": {
     "leverage": 18,
     "per_position_usdt": 100,
-    "take_profit_pct": 0.055,
-    "stop_loss_pct": 0.013,
+    "take_profit_pct": 1,
+    "stop_loss_pct": 0.2,
     "trailing_stop": true,
-    "trailing_distance": 0.0185,
+    "trailing_distance": 0.3,
     "unit_type": "quote",
     "enable_symbol_pool": false,
     "verbose_log": false,

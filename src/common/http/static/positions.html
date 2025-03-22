@@ -402,6 +402,15 @@
                                     <div class="progress-bar bg-success" role="progressbar" style="width: ${ladderClosed}%" aria-valuenow="${ladderClosed}" aria-valuemin="0" aria-valuemax="100"></div>
                                 </div>
                             </div>` : ''}
+                            ${position.realized_pnl ? `
+                            <div class="d-flex justify-content-between mb-3">
+                                <div>未实现盈亏:</div>
+                                <div class="${pnlClass}">${position.unrealized_pnl ? position.unrealized_pnl.toFixed(2) : '0.00'} USDT</div>
+                            </div>
+                            <div class="d-flex justify-content-between mb-3">
+                                <div>已实现盈亏:</div>
+                                <div class="${position.realized_pnl >= 0 ? 'profit' : 'loss'}">${position.realized_pnl.toFixed(2)} USDT</div>
+                            </div>` : ''}
                             <div class="d-flex justify-content-between mb-3">
                                 <div>盈亏:</div>
                                 <div class="${pnlClass}">${pnlAmount} USDT (${pnlPercent}%)</div>
