@@ -98,6 +98,12 @@ class BaseStrategy(ABC):
         self.trailing_stop = self.strategy_config.get('trailing_stop', False)
         self.trailing_distance = self.strategy_config.get('trailing_distance', 0.02)
         
+        # 时间止损配置
+        time_stop_loss = self.strategy_config.get('time_stop_loss', {})
+        self.enable_time_stop = time_stop_loss.get('enabled', False)
+        self.time_stop_candle_timeframe = time_stop_loss.get('candle_timeframe', 15)  # 默认15分钟
+        self.time_stop_candle_count = time_stop_loss.get('candle_count', 3)  # 默认3根K线
+        
         # 委托单位设置
         self.unit_type = self.strategy_config.get('unit_type', 'quote')
         
@@ -154,7 +160,10 @@ class BaseStrategy(ABC):
             "追踪止损": self.trailing_stop,
             "委托单位": self.unit_type,
             "允许交易对": list(self.allowed_symbols) if self.enable_symbol_pool else "全部",
-            "详细日志": "开启" if self.verbose_log else "关闭"
+            "详细日志": "开启" if self.verbose_log else "关闭",
+            "时间止损": "开启" if self.enable_time_stop else "关闭",
+            "时间止损K线周期": f"{self.time_stop_candle_timeframe}分钟" if self.enable_time_stop else "禁用",
+            "时间止损K线数量": self.time_stop_candle_count if self.enable_time_stop else "禁用"
         })
         
         # 内存缓存 - 避免频繁请求
@@ -419,7 +428,7 @@ class BaseStrategy(ABC):
         trailing_stop = signal.trailing_stop if signal.trailing_stop is not None else self.trailing_stop
         trailing_distance = signal.trailing_distance if signal.trailing_distance is not None else self.trailing_distance
         
-        # 记录原始止盈止损比例
+        # 记录原始止盈止损比例（不涉及 entry_price，所以可以安全地记录）
         self.logger.info(f"【开仓】{signal.symbol} 原始止盈止损比例: 止盈={take_profit_pct*100:.2f}%, 止损={stop_loss_pct*100:.2f}%")
         
         # 检查信号中是否包含阶梯止盈设置
@@ -449,16 +458,20 @@ class BaseStrategy(ABC):
             stop_loss_pct = stop_loss_pct / leverage
             self.logger.info(f"【开仓】{signal.symbol} 杠杆调整后止盈止损比例: 止盈={take_profit_pct*100:.2f}%, 止损={stop_loss_pct*100:.2f}%")
             
-            # 计算实际止盈止损价格和触发方向
-            if signal.direction == "long":
-                tp_price = signal.entry_price * (1 + take_profit_pct)
-                sl_price = signal.entry_price * (1 - stop_loss_pct)
-                self.logger.info(f"【开仓】{signal.symbol} 多头止盈止损价格: 入场={signal.entry_price:.4f}, 止盈={tp_price:.4f}, 止损={sl_price:.4f}")
+            # 确保有入场价格
+            if signal.entry_price is None:
+                self.logger.warning(f"【开仓】{signal.symbol} 信号中未指定入场价格，无法计算止盈止损价格")
             else:
-                tp_price = signal.entry_price * (1 - take_profit_pct)
-                sl_price = signal.entry_price * (1 + stop_loss_pct)
-                self.logger.info(f"【开仓】{signal.symbol} 空头止盈止损价格: 入场={signal.entry_price:.4f}, 止盈={tp_price:.4f}, 止损={sl_price:.4f}")
-                
+                # 计算实际止盈止损价格和触发方向
+                if signal.direction == "long":
+                    tp_price = signal.entry_price * (1 + take_profit_pct)
+                    sl_price = signal.entry_price * (1 - stop_loss_pct)
+                    self.logger.info(f"【开仓】{signal.symbol} 多头止盈止损价格: 入场={signal.entry_price:.4f}, 止盈={tp_price:.4f}, 止损={sl_price:.4f}")
+                else:
+                    tp_price = signal.entry_price * (1 - take_profit_pct)
+                    sl_price = signal.entry_price * (1 + stop_loss_pct)
+                    self.logger.info(f"【开仓】{signal.symbol} 空头止盈止损价格: 入场={signal.entry_price:.4f}, 止盈={tp_price:.4f}, 止损={sl_price:.4f}")
+        
         self.update_strategy_status(StrategyStatus.OPENING_POSITION, f"开仓: {signal.symbol} {side}")
         
         # 设置杠杆
@@ -558,8 +571,11 @@ class BaseStrategy(ABC):
             if signal.symbol in self.positions:
                 self.logger.info(f"在本地缓存中找到{signal.symbol}的仓位信息，执行平仓")
                 position = self.positions[signal.symbol]
-                await self._execute_close_position(signal.symbol, position)
-                return True, f"成功平仓: {signal.symbol}"
+                success, msg = await self._execute_close_position(signal.symbol, position)
+                if success:
+                    return True, f"成功平仓: {signal.symbol}"
+                else:
+                    return False, f"平仓失败: {msg}"
             
             # 如果本地缓存没有，尝试从交易所API获取
             self.logger.info(f"本地缓存没有{signal.symbol}的仓位，尝试从交易所API获取")
@@ -673,8 +689,11 @@ class BaseStrategy(ABC):
                     
                     # 执行平仓操作
                     try:
-                        await self._execute_close_position(symbol, position_obj)
-                        return True, f"成功平仓: {symbol}"
+                        success, msg = await self._execute_close_position(symbol, position_obj)
+                        if success:
+                            return True, f"成功平仓: {symbol}"
+                        else:
+                            return False, f"平仓失败: {msg}"
                     except Exception as e:
                         self.logger.error(f"平仓失败: {e}", exc_info=True)
                         # 更新策略状态为错误
@@ -750,6 +769,9 @@ class BaseStrategy(ABC):
     async def monitor_positions(self):
         """监控所有持仓，执行止盈止损策略"""
         try:
+            # 添加调试代码检查方法定义
+            self.logger.info(f"调试: _execute_close_position 方法ID: {id(self._execute_close_position)}")
+            
             # 检查是否有持仓
             if not self.positions:
                 return
@@ -928,51 +950,18 @@ class BaseStrategy(ABC):
                     # 添加诊断日志 - 最终止盈止损价格
                     self.logger.info(f"【诊断】{symbol} 最终止盈止损价格: 止盈={take_profit_price:.4f}, 止损={stop_loss_price:.4f}")
                     
-                    # 计算距离止盈和止损的百分比
-                    distance_to_tp_pct = abs((take_profit_price - mark_price) / mark_price)
-                    distance_to_sl_pct = abs((stop_loss_price - mark_price) / mark_price)
+                    # 检查时间止损条件
+                    time_stop_triggered = await self._check_time_based_stop_loss(symbol, position)
+                    if time_stop_triggered:
+                        self.logger.info(f"{symbol} 触发时间止损，执行平仓")
+                        success, msg = await self._execute_close_position(symbol, position)
+                        if success:
+                            self.logger.info(f"{symbol} 时间止损平仓成功: {msg}")
+                        else:
+                            self.logger.error(f"{symbol} 时间止损平仓失败: {msg}")
+                        continue
                     
-                    # 只有当verbose_log开启时，才打印详细的持仓信息
-                    if self.verbose_log:
-                        # 打印详细的持仓信息
-                        position_info = (
-                            f"\n{'='*70}\n"
-                            f"持仓详情 - {symbol} ({direction.upper()})\n"
-                            f"{'-'*70}\n"
-                            f"入场价格: {position.entry_price:.4f}    当前价格: {mark_price:.4f}    数量: {abs(position.quantity)}\n"
-                            f"杠杆倍数: {position.leverage}倍    持仓时间: {holding_time_str}    保证金: {margin:.2f} USDT\n"
-                            f"{'-'*70}\n"
-                            f"盈亏比例: {pnl_pct*100:+.2f}%    杠杆后盈亏: {leveraged_pnl_pct*100:+.2f}%    盈亏金额: {pnl_amount:+.2f} USDT\n"
-                            f"{'-'*70}\n"
-                            f"止盈价格: {take_profit_price:.4f} (距离: {distance_to_tp_pct*100:.2f}%)\n"
-                            f"止损价格: {stop_loss_price:.4f} (距离: {distance_to_sl_pct*100:.2f}%)\n"
-                            f"追踪止损: {'启用' if trailing_stop else '禁用'}"
-                        )
-                        
-                        if trailing_stop:
-                            position_info += f"    追踪止损价格: {'未触发' if trailing_stop_price is None else f'{trailing_stop_price:.4f}'}\n"
-                        else:
-                            position_info += "\n"
-                        
-                        # 添加阶梯止盈信息
-                        if hasattr(position, 'ladder_tp') and position.ladder_tp:
-                            position_info += f"阶梯止盈: 已启用    每档比例: {position.ladder_tp_pct*100:.0f}%    档位间隔: {position.ladder_tp_step*100:.0f}%    已平仓: {position.ladder_closed_pct*100:.0f}%\n"
-                        else:
-                            position_info += f"阶梯止盈: 未启用\n"
-                        
-                        if direction == "long":
-                            position_info += f"最高价格: {position.high_price:.4f} (入场价: {position.entry_price:.4f})\n"
-                        else:
-                            position_info += f"最低价格: {position.low_price:.4f} (入场价: {position.entry_price:.4f})\n"
-                        
-                        position_info += f"{'='*70}"
-                        
-                        self.logger.info(position_info)
-                    else:
-                        # 精简信息打印
-                        self.logger.info(f"持仓 {symbol} ({direction.upper()}) 入场:{position.entry_price:.4f} 当前:{mark_price:.4f} 盈亏:{pnl_pct*100:+.2f}% 杠杆后:{leveraged_pnl_pct*100:+.2f}%")
-                    
-                    # 检查是否达到止盈止损条件
+                    # 检查是否触发止盈止损条件
                     await self._check_take_profit_stop_loss(position, mark_price, take_profit_price, stop_loss_price)
                     
                 except Exception as e:
@@ -1018,11 +1007,19 @@ class BaseStrategy(ABC):
         # 检查是否需要止损
         if position.direction == 'long' and mark_price <= stop_loss_price:
             self.logger.info(f"{symbol} 触发止损，价格: {mark_price} <= {stop_loss_price}")
-            await self._execute_close_position(symbol, position)
+            success, msg = await self._execute_close_position(symbol, position)
+            if success:
+                self.logger.info(f"{symbol} 止损平仓成功: {msg}")
+            else:
+                self.logger.error(f"{symbol} 止损平仓失败: {msg}")
             return
         elif position.direction == 'short' and mark_price >= stop_loss_price:
             self.logger.info(f"{symbol} 触发止损，价格: {mark_price} >= {stop_loss_price}")
-            await self._execute_close_position(symbol, position)
+            success, msg = await self._execute_close_position(symbol, position)
+            if success:
+                self.logger.info(f"{symbol} 止损平仓成功: {msg}")
+            else:
+                self.logger.error(f"{symbol} 止损平仓失败: {msg}")
             return
         
         # 检查阶梯止盈
@@ -1175,27 +1172,42 @@ class BaseStrategy(ABC):
                     error_msg = close_result.get('msg', 'Unknown error') if close_result else 'No response'
                     self.logger.error(f"部分平仓失败: {error_msg}")
                     self.logger.warning(f"部分平仓失败，尝试全部平仓")
-                    await self._execute_close_position(symbol, position)
+                    success, msg = await self._execute_close_position(symbol, position)
+                    if success:
+                        self.logger.info(f"{symbol} 全部平仓成功: {msg}")
+                    else:
+                        self.logger.error(f"{symbol} 全部平仓失败: {msg}")
                 
                 return
         
         # 检查常规止盈
         if position.direction == 'long' and mark_price >= take_profit_price:
             self.logger.info(f"{symbol} 触发止盈，价格: {mark_price} >= {take_profit_price}")
-            await self._execute_close_position(symbol, position)
+            success, msg = await self._execute_close_position(symbol, position)
+            if success:
+                self.logger.info(f"{symbol} 止盈平仓成功: {msg}")
+            else:
+                self.logger.error(f"{symbol} 止盈平仓失败: {msg}")
             return
         elif position.direction == 'short' and mark_price <= take_profit_price:
             self.logger.info(f"{symbol} 触发止盈，价格: {mark_price} <= {take_profit_price}")
-            await self._execute_close_position(symbol, position)
+            success, msg = await self._execute_close_position(symbol, position)
+            if success:
+                self.logger.info(f"{symbol} 止盈平仓成功: {msg}")
+            else:
+                self.logger.error(f"{symbol} 止盈平仓失败: {msg}")
             return
     
-    async def _execute_close_position(self, symbol: str, position: Position):
+    async def _execute_close_position(self, symbol: str, position: Position) -> Tuple[bool, str]:
         """
         执行平仓操作
         
         Args:
             symbol: 交易对
             position: 仓位对象
+            
+        Returns:
+            Tuple[bool, str]: (是否成功, 消息)
         """
         try:
             # 获取当前价格
@@ -1241,8 +1253,9 @@ class BaseStrategy(ABC):
             )
             
             if not close_result or close_result.get("code") != "0":
-                self.logger.error(f"平仓失败: {close_result}")
-                return
+                error_msg = close_result.get("msg", "未知错误") if close_result else "未知错误"
+                self.logger.error(f"平仓失败: {error_msg}")
+                return False, f"平仓交易执行失败: {error_msg}"
             
             # 计算收益信息
             direction = "long" if position.quantity > 0 else "short"
@@ -1281,9 +1294,12 @@ class BaseStrategy(ABC):
                         del self._price_high_low[symbol]
                         self.logger.info(f"价格记录已从内存中移除: {symbol}")
             except Exception as e:
-                self.logger.exception(f"移除内存仓位异常: {e}")
+                self.logger.error(f"移除内存仓位异常: {e}", exc_info=True)
+                # 记录但不返回失败，因为交易已经成功
             
-            # 更新数据库 - 标记为已平仓
+            # 更新数据库和风控 - 标记为已平仓
+            db_updated = False
+            risk_updated = False
             try:
                 exit_timestamp = int(time.time() * 1000)
                 # 传递position_id，确保关闭正确的仓位
@@ -1296,17 +1312,24 @@ class BaseStrategy(ABC):
                     position_id=position.position_id
                 )
                 self.logger.info(f"仓位已在数据库中标记为已平仓: {symbol}, position_id: {position.position_id}")
+                db_updated = True
                 
                 # 通知风控系统平仓信息
                 if hasattr(self.position_mgr, 'risk_controller'):
                     self.position_mgr.risk_controller.record_close_position(symbol, is_partial_close=False)
                     self.logger.debug(f"已通知风控系统平仓: {symbol}")
+                    risk_updated = True
             except Exception as e:
-                self.logger.exception(f"更新数据库仓位状态异常: {e}")
+                self.logger.error(f"更新数据库或风控系统状态异常: {e}", exc_info=True)
+                # 交易已成功但数据库更新失败，返回警告信息
+                if not db_updated:
+                    return True, f"平仓成功但数据库更新失败: {symbol} @ {mark_price}, PnL: {pnl_amount:.2f} USDT"
+                elif not risk_updated:
+                    return True, f"平仓成功但风控系统更新失败: {symbol} @ {mark_price}, PnL: {pnl_amount:.2f} USDT"
             
             return True, f"平仓成功: {symbol} @ {mark_price}, PnL: {pnl_amount:.2f} USDT"
         except Exception as e:
-            self.logger.exception(f"平仓异常: {e}")
+            self.logger.error(f"平仓异常: {e}", exc_info=True)
             return False, f"平仓异常: {e}"
     
     def get_position_summary(self) -> Dict[str, Any]:
@@ -1546,6 +1569,128 @@ class BaseStrategy(ABC):
             
         # 初始化子类
         self._init_strategy()
+
+    async def _check_time_based_stop_loss(self, symbol: str, position: Position) -> bool:
+        """
+        检查基于时间的止损条件
+        
+        Args:
+            symbol: 交易对
+            position: 仓位信息
+            
+        Returns:
+            bool: 是否触发止损
+        """
+        if not self.enable_time_stop:
+            return False
+            
+        # 计算开仓以来的时间（分钟）
+        current_timestamp = int(time.time() * 1000)
+        position_timestamp = position.timestamp
+        if position_timestamp < 9999999999:  # 如果是秒级时间戳
+            position_timestamp *= 1000
+        
+        elapsed_minutes = (current_timestamp - position_timestamp) / (1000 * 60)
+        
+        # 如果没有达到检查的最小时间，直接返回
+        min_check_minutes = self.time_stop_candle_timeframe * self.time_stop_candle_count
+        if elapsed_minutes < min_check_minutes:
+            self.logger.debug(f"{symbol} 开仓时间不足 {min_check_minutes} 分钟，跳过时间止损检查")
+            return False
+            
+        try:
+            # 获取历史K线数据
+            # 从交易所获取K线数据
+            candles = None
+            try:
+                # 获取K线数据，使用OKEx API
+                # 周期格式转换为OKEx格式 (15min -> 15m)
+                bar_type = f"{self.time_stop_candle_timeframe}m"
+                
+                # 确保 time_stop_candle_count 是整数
+                candle_count = int(self.time_stop_candle_count)
+                
+                # 获取最近n根K线 - 使用 get_kline_data
+                candles = self.trader.get_kline_data(
+                    inst_id=symbol,
+                    bar=bar_type,
+                    limit=candle_count
+                )
+                
+                # 调试信息
+                self.logger.debug(f"获取到的K线数据: {candles}")
+                
+                # OKExTrader.get_kline_data方法的返回结构分析
+                if not candles:
+                    self.logger.warning(f"获取 {symbol} 的K线数据失败: 返回空数据")
+                    return False
+                
+                # 检查返回的数据格式，确定是列表还是包含data字段的字典
+                candle_data = None
+                if isinstance(candles, dict) and 'data' in candles:
+                    candle_data = candles['data']
+                elif isinstance(candles, list):
+                    candle_data = candles
+                else:
+                    self.logger.warning(f"获取 {symbol} 的K线数据格式不识别: {candles}")
+                    return False
+                
+                # 检查是否有足够的K线数据
+                if not candle_data or len(candle_data) < candle_count:
+                    self.logger.warning(f"{symbol} K线数据不足 {candle_count} 根，跳过时间止损检查，获取了: {len(candle_data) if candle_data else 0} 根")
+                    return False
+                
+                # 处理K线数据，提取收盘价
+                try:
+                    closing_prices = []
+                    for candle in candle_data[:candle_count]:
+                        if isinstance(candle, list) and len(candle) > 4 and candle[4]:
+                            try:
+                                closing_prices.append(float(candle[4]))
+                            except (ValueError, TypeError):
+                                self.logger.warning(f"{symbol} K线收盘价转换失败: {candle[4]}")
+                        else:
+                            self.logger.warning(f"{symbol} K线数据格式异常: {candle}")
+                    
+                    if len(closing_prices) < candle_count:
+                        self.logger.warning(f"{symbol} 有效收盘价不足 {candle_count} 个，跳过时间止损检查")
+                        return False
+                    
+                    # K线是按时间倒序排列的，最新的在前面，转为时间正序
+                    closing_prices.reverse()
+                    
+                    self.logger.info(f"{symbol} 成功获取K线收盘价: {closing_prices}")
+                    
+                except Exception as e:
+                    self.logger.error(f"{symbol} 处理K线数据异常: {e}, 原始数据: {candle_data[:candle_count]}")
+                    return False
+                    
+                # 检查是否所有K线都没有收益
+                direction = position.direction
+                if direction == "long":
+                    # 多头：检查所有收盘价是否都小于等于开仓价
+                    no_profit = all(price <= position.entry_price for price in closing_prices)
+                else:  # short
+                    # 空头：检查所有收盘价是否都大于等于开仓价
+                    no_profit = all(price >= position.entry_price for price in closing_prices)
+                    
+                if no_profit:
+                    self.logger.info(f"{symbol} 连续 {self.time_stop_candle_count} 根 {self.time_stop_candle_timeframe} 分钟K线没有收益，触发时间止损")
+                    self.logger.info(f"{symbol} 开仓价: {position.entry_price}, K线收盘价: {closing_prices}")
+                    return True
+                else:
+                    self.logger.debug(f"{symbol} 未触发时间止损，开仓价: {position.entry_price}, K线收盘价: {closing_prices}")
+                    return False
+                    
+            except Exception as e:
+                self.logger.error(f"检查 {symbol} 时间止损异常: {e}")
+                return False
+                
+        except Exception as e:
+            self.logger.error(f"{symbol} 时间止损检查异常: {e}")
+            return False
+        
+        return False
 
 
 class TradingFramework:
