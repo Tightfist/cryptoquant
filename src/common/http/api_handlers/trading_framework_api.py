@@ -149,45 +149,137 @@ class TradingFrameworkApiHandler:
             web.Response: HTTP响应
         """
         try:
-            # 获取今日盈亏
-            today_pnl = await self.framework.get_daily_pnl()
+            # 获取查询参数
+            params = request.query
+            start_date = params.get('start_date')
+            end_date = params.get('end_date')
             
-            # 计算胜率
-            position_history = await self.framework.get_position_history()
-            win_count = 0
-            total_closed = 0
+            # 获取每日收益数据
+            daily_pnl = await self.framework.get_daily_pnl(start_date, end_date)
             
-            for position in position_history:
-                if position.get('closed', False) or position.get('exit_timestamp', 0) > 0:
-                    total_closed += 1
+            # 计算今日总收益和胜率
+            today = datetime.datetime.now().strftime("%Y-%m-%d")
+            today_pnl = 0
+            win_positions = 0
+            total_positions = 0
+            
+            for day_data in daily_pnl:
+                if day_data.get('date') == today:
+                    today_pnl = day_data.get('pnl', 0)
+                    break
+            
+            # 获取今日胜率
+            # 获取当天结束的仓位
+            today_datetime = datetime.datetime.strptime(today, "%Y-%m-%d")
+            today_timestamp = int(today_datetime.timestamp() * 1000)
+            tomorrow_timestamp = int((today_datetime + datetime.timedelta(days=1)).timestamp() * 1000)
+            
+            # 简单计算胜率
+            positions = await self.framework.get_position_history(today, today)
+            for position in positions:
+                if position.get('exit_timestamp', 0) >= today_timestamp and position.get('exit_timestamp', 0) < tomorrow_timestamp:
+                    total_positions += 1
                     if position.get('pnl_amount', 0) > 0:
-                        win_count += 1
+                        win_positions += 1
             
-            win_rate = (win_count / total_closed * 100) if total_closed > 0 else 0
+            win_rate = 0 if total_positions == 0 else (win_positions / total_positions) * 100
             
-            # 当日盈亏总和
-            today_total_pnl = 0
-            if today_pnl:
-                for day_data in today_pnl:
-                    if day_data.get('date') == datetime.datetime.now().strftime('%Y-%m-%d'):
-                        today_total_pnl = day_data.get('pnl', 0)
-                        break
-            
+            # 返回结果
             return web.json_response({
-                'success': True,
-                'data': {
-                    'today_pnl': today_total_pnl,
-                    'win_rate': win_rate,
-                    'win_count': win_count,
-                    'total_closed': total_closed
+                "success": True,
+                "data": {
+                    "daily_pnl": daily_pnl, 
+                    "today_pnl": today_pnl,
+                    "win_rate": win_rate,
+                    "total_positions": total_positions
                 }
             })
         except Exception as e:
-            self.logger.exception(f"获取每日盈亏和胜率数据异常: {str(e)}", exc_info=True)
+            self.logger.exception(f"处理每日收益查询API异常: {e}")
+            return web.json_response(
+                {"success": False, "message": f"处理异常: {e}"},
+                status=500
+            )
+    
+    async def handle_api_btc_price_today(self, request: web.Request) -> web.Response:
+        """
+        处理获取BTC今日价格变化API请求，用于收益曲线图表显示
+        
+        Args:
+            request: HTTP请求对象
+            
+        Returns:
+            web.Response: HTTP响应，包含今日每个小时的BTC价格数据
+        """
+        try:
+            # 获取BTC的K线数据
+            # 指定24根1小时K线数据，覆盖整个交易日
+            klines_result = await self.framework.strategy.data_cache.get_klines("BTC-USDT-SWAP", "1H", 24)
+            
+            if not klines_result or 'data' not in klines_result or not klines_result['data']:
+                return web.json_response({
+                    "success": False,
+                    "message": "无法获取BTC价格数据"
+                }, status=500)
+            
+            # 获取今日开始时间（0点）
+            today = datetime.datetime.now()
+            today = datetime.datetime(today.year, today.month, today.day, 0, 0, 0)
+            today_timestamp = int(today.timestamp() * 1000)  # 转为毫秒
+            
+            # 从K线数据中筛选今日的数据
+            klines_data = klines_result['data']
+            today_klines = []
+            
+            for kline in klines_data:
+                kline_timestamp = int(kline[0])  # K线的时间戳
+                if kline_timestamp >= today_timestamp:
+                    today_klines.append({
+                        "timestamp": kline_timestamp,
+                        "price": float(kline[4])  # 使用收盘价
+                    })
+            
+            # 如果没有今日数据，获取最新价格
+            if not today_klines:
+                mark_price = await self.framework.strategy.data_cache.get_mark_price("BTC-USDT-SWAP")
+                now_timestamp = int(datetime.datetime.now().timestamp() * 1000)
+                today_klines = [{
+                    "timestamp": today_timestamp,
+                    "price": mark_price
+                }, {
+                    "timestamp": now_timestamp,
+                    "price": mark_price
+                }]
+            
+            # 确保有当天开始时间的价格点
+            # 检查是否已有0点数据，如果没有，添加一个
+            has_start_time = False
+            for kline in today_klines:
+                if abs(kline["timestamp"] - today_timestamp) < 3600000:  # 1小时内
+                    has_start_time = True
+                    break
+            
+            if not has_start_time and today_klines:
+                # 获取最早的价格点作为0点价格
+                earliest_price = today_klines[0]["price"]
+                today_klines.insert(0, {
+                    "timestamp": today_timestamp,
+                    "price": earliest_price
+                })
+            
+            # 按时间排序
+            today_klines.sort(key=lambda x: x["timestamp"])
+            
             return web.json_response({
-                'success': False,
-                'message': f"获取每日盈亏和胜率数据异常: {str(e)}"
+                "success": True,
+                "data": today_klines
             })
+        except Exception as e:
+            self.logger.exception(f"处理BTC价格查询API异常: {e}")
+            return web.json_response({
+                "success": False,
+                "message": f"处理异常: {e}"
+            }, status=500)
     
     async def handle_api_position_history(self, request: web.Request) -> web.Response:
         """
@@ -414,6 +506,7 @@ class TradingFrameworkApiHandler:
         daily_pnl_path = f"{base_path}/api/daily_pnl" if base_path else "/api/daily_pnl"
         position_history_path = f"{base_path}/api/position_history" if base_path else "/api/position_history"
         open_positions_path = f"{base_path}/api/open_positions" if base_path else "/api/open_positions"
+        btc_price_path = f"{base_path}/api/btc_price_today" if base_path else "/api/btc_price_today"
         
         # 返回路由列表
         return [
@@ -422,7 +515,8 @@ class TradingFrameworkApiHandler:
             ('GET', status_path, self.handle_api_status),
             ('GET', daily_pnl_path, self.handle_api_daily_pnl),
             ('GET', position_history_path, self.handle_api_position_history),
-            ('GET', open_positions_path, self.handle_api_open_positions)
+            ('GET', open_positions_path, self.handle_api_open_positions),
+            ('GET', btc_price_path, self.handle_api_btc_price_today)
         ]
     
     def register_routes(self, app: web.Application, base_path: str = ""):

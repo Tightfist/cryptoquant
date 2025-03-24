@@ -1021,7 +1021,7 @@ class BaseStrategy(ABC):
             else:
                 self.logger.error(f"{symbol} 止损平仓失败: {msg}")
             return
-        
+            
         # 检查阶梯止盈
         ladder_tp = getattr(position, 'ladder_tp', False)
         if ladder_tp and hasattr(position, 'ladder_tp_pct') and hasattr(position, 'ladder_tp_step'):
@@ -1041,16 +1041,16 @@ class BaseStrategy(ABC):
             # 计算该级别对应的应平仓百分比
             target_closed_pct = current_ladder_level * ladder_tp_pct
             
-            # 如果应平仓百分比大于已平仓百分比，则执行部分平仓
+            # 确保不超过1.0（全部平仓）
+            target_closed_pct = min(target_closed_pct, 1.0)
+            
+            # 检查是否有新的平仓需求
             if current_ladder_level > 0 and target_closed_pct > ladder_closed_pct:
-                # 计算本次要平仓的百分比和数量
-                close_pct_this_time = target_closed_pct - position.ladder_closed_pct
+                # 计算本次需要平仓的百分比
+                new_close_pct = target_closed_pct - ladder_closed_pct
                 
-                # 原数量
-                original_quantity = abs(position.quantity)
-                
-                # 原始计划平仓数量
-                raw_close_quantity = original_quantity * close_pct_this_time
+                # 计算本次平仓数量
+                close_quantity = abs(position.quantity) * new_close_pct
                 
                 # 获取合约信息，用于圆整数量
                 try:
@@ -1066,31 +1066,34 @@ class BaseStrategy(ABC):
                         precision = 0
                     
                     # 圆整平仓数量
-                    close_quantity = round(raw_close_quantity / lot_size) * lot_size
+                    close_quantity = round(close_quantity / lot_size) * lot_size
                     close_quantity = round(close_quantity, precision)
-                    close_quantity = max(close_quantity, lot_size)  # 确保不低于最小交易单位
                     
-                    # 校正平仓百分比
-                    close_pct_this_time = close_quantity / original_quantity if original_quantity > 0 else 0
-                    
-                    self.logger.info(f"{symbol} 圆整平仓数量: 原始={raw_close_quantity}, 圆整后={close_quantity}, 对应百分比={close_pct_this_time*100:.2f}%")
+                    self.logger.info(f"{symbol} 阶梯止盈平仓数量 (已圆整): {close_quantity} ({new_close_pct*100:.2f}%)")
                 except Exception as e:
-                    # 如果获取合约信息失败，使用原始数量
-                    close_quantity = raw_close_quantity
                     self.logger.warning(f"获取合约信息圆整数量失败，使用原始数量: {e}")
                 
-                # 确定持仓方向
-                pos_side = "long" if position.direction == "long" else "short"
-                # 平仓方向与开仓相反
+                # 确定平仓方向（与持仓方向相反）
                 side = "sell" if position.direction == "long" else "buy"
+                pos_side = position.direction
                 
-                # 更新已平仓比例
-                position.ladder_closed_pct = target_closed_pct
+                # 如果是同时触发阶梯止盈和常规止盈，则直接执行全部平仓
+                should_full_close = False
+                if (position.direction == 'long' and mark_price >= take_profit_price) or \
+                   (position.direction == 'short' and mark_price <= take_profit_price):
+                    self.logger.info(f"{symbol} 同时触发阶梯止盈和常规止盈，执行全部平仓")
+                    should_full_close = True
                 
-                # 更新持仓数据库
-                self.position_mgr.save_position(position)
+                if should_full_close:
+                    # 执行全部平仓
+                    success, msg = await self._execute_close_position(symbol, position)
+                    if success:
+                        self.logger.info(f"{symbol} 全部平仓成功: {msg}")
+                    else:
+                        self.logger.error(f"{symbol} 全部平仓失败: {msg}")
+                    return
                 
-                # 执行部分平仓操作 - 注意这里不使用await，因为swap_order不是异步方法
+                # 执行部分平仓
                 close_result = self.trader.swap_order(
                     inst_id=symbol,
                     side=side,
@@ -1098,50 +1101,55 @@ class BaseStrategy(ABC):
                     sz=close_quantity
                 )
                 
-                if close_result and close_result.get('code') == '0':
-                    # 更新持仓数量
-                    new_quantity = position.quantity * (1 - close_pct_this_time)
+                if close_result and close_result.get("code") == "0":
+                    # 更新已平仓百分比
+                    position.ladder_closed_pct = target_closed_pct
                     
-                    # 圆整更新后的数量，避免浮点数精度问题
+                    # 更新持仓量
+                    original_quantity = position.quantity
+                    new_quantity = position.quantity * (1 - new_close_pct)
+                    
+                    if position.direction == "long":
+                        new_quantity = min(new_quantity, original_quantity)  # 确保不会增加持仓
+                    else:  # short
+                        new_quantity = max(new_quantity, original_quantity)  # 确保不会增加持仓
+                    
                     try:
-                        # 保持原数量的正负号
-                        sign = 1 if new_quantity > 0 else -1
-                        abs_new_quantity = abs(new_quantity)
+                        # 圆整更新后的持仓数量
+                        if position.direction == "long":
+                            new_quantity = round(new_quantity / lot_size) * lot_size
+                            new_quantity = round(new_quantity, precision)
+                        else:  # short
+                            new_quantity = round(new_quantity / lot_size) * lot_size
+                            new_quantity = round(new_quantity, precision)
                         
-                        # 使用相同的圆整逻辑
-                        abs_new_quantity = round(abs_new_quantity / lot_size) * lot_size
-                        abs_new_quantity = round(abs_new_quantity, precision)
-                        
-                        # 恢复正负号
-                        position.quantity = sign * abs_new_quantity
-                        
-                        self.logger.info(f"{symbol} 更新后的持仓数量圆整: 原始={new_quantity}, 圆整后={position.quantity}")
                     except Exception as e:
-                        # 如果圆整失败，使用原始计算结果
                         position.quantity = new_quantity
                         self.logger.warning(f"圆整更新后的持仓数量失败，使用原始计算结果: {e}")
                     
-                    # 获取必要的变量
-                    # 合约面值
-                    contract_size = self.get_contract_size_sync(symbol)
-                    
-                    # 计算杠杆后的盈亏百分比 - 这个变量在当前函数中并没有定义，所以需要重新计算
-                    if position.direction == 'long':
-                        leveraged_pnl_pct = (mark_price - position.entry_price) / position.entry_price * position.leverage
-                    else:  # short
-                        leveraged_pnl_pct = (position.entry_price - mark_price) / position.entry_price * position.leverage
-                    
-                    # 计算部分平仓收益
+                    # 计算部分平仓收益（估算）
                     # 合约价值 = 数量 * 入场价格 * 合约面值
+                    contract_size = self.get_contract_size_sync(symbol)
                     closed_contract_value = close_quantity * position.entry_price * contract_size
-                    # 保证金 = 合约价值 / 杠杆倍数
+                    
+                    # 计算杠杆收益率
+                    if position.direction == 'long':
+                        pnl_pct = (mark_price - position.entry_price) / position.entry_price
+                    else:  # short
+                        pnl_pct = (position.entry_price - mark_price) / position.entry_price
+                    
+                    # 带杠杆的收益率
+                    leveraged_pnl_pct = pnl_pct * position.leverage
+                    
                     closed_margin = closed_contract_value / position.leverage
-                    # 实际盈亏金额（考虑杠杆）
                     closed_pnl = closed_margin * leveraged_pnl_pct
                     
-                    # 记录平仓信息
-                    self.logger.info(f"{symbol} 部分平仓成功，平仓数量: {close_quantity}, 剩余持仓: {abs(position.quantity)}")
+                    # 记录部分平仓信息
+                    self.logger.info(f"{symbol} 部分平仓成功，平仓数量: {close_quantity}, 剩余持仓: {abs(new_quantity)}")
                     self.logger.info(f"{symbol} 部分平仓收益: {closed_pnl:.2f} USDT ({leveraged_pnl_pct*100:.2f}%)")
+                    
+                    # 更新持仓数量
+                    position.quantity = new_quantity
                     
                     # 累计已实现收益 - 如果属性不存在则初始化为0
                     if not hasattr(position, 'realized_pnl'):
@@ -1405,7 +1413,7 @@ class BaseStrategy(ABC):
         """
         return await self.strategy.get_status()
     
-    def get_daily_pnl(self, start_date: str = None, end_date: str = None) -> List[Dict]:
+    async def get_daily_pnl(self, start_date: str = None, end_date: str = None) -> List[Dict]:
         """
         获取每日收益统计
         
@@ -1425,7 +1433,7 @@ class BaseStrategy(ABC):
             self.logger.warning("获取每日收益统计为空")
         return result
     
-    def get_position_history(self, start_date: str = None, end_date: str = None, 
+    async def get_position_history(self, start_date: str = None, end_date: str = None, 
                             symbol: str = None, limit: int = 100) -> List[Dict]:
         """
         获取历史仓位记录
@@ -1788,8 +1796,8 @@ class TradingFramework:
             error_throttle_seconds(int): 错误后等待重启的秒数
         """
         # 记录最后风控重置日期
-        last_reset_date = datetime.utcnow().date()
-        self.logger.info(f"初始化风控重置日期: {last_reset_date}")
+        last_reset_date = datetime.now().date()
+        self.logger.info(f"初始化风控重置日期: {last_reset_date} (本地时间)")
         
         self.logger.info(f"启动交易框架 {self.app_name}")
         
@@ -1800,10 +1808,10 @@ class TradingFramework:
         error_count = 0
         while True:
             try:
-                # 检查是否需要重置日期计数器（UTC时间跨天）
-                current_date = datetime.utcnow().date()
+                # 检查是否需要重置日期计数器（本地时间的午夜）
+                current_date = datetime.now().date()
                 if current_date > last_reset_date:
-                    self.logger.info(f"检测到日期变更: {last_reset_date} -> {current_date}, 重置风控每日计数器")
+                    self.logger.info(f"检测到日期变更: {last_reset_date} -> {current_date} (本地时间), 重置风控每日计数器")
                     if hasattr(self.position_mgr, 'risk_controller'):
                         # 重置每日计数器，但保留持仓数
                         current_positions = self.position_mgr.risk_controller.current_positions_count
@@ -2036,7 +2044,7 @@ class TradingFramework:
         Returns:
             List[Dict]: 每日收益统计列表
         """
-        return self.strategy.get_daily_pnl(start_date, end_date)
+        return await self.strategy.get_daily_pnl(start_date, end_date)
     
     async def get_position_history(self, start_date: str = None, end_date: str = None, 
                                   symbol: str = None, limit: int = 100) -> List[Dict]:
@@ -2052,11 +2060,4 @@ class TradingFramework:
         Returns:
             List[Dict]: 历史仓位记录列表
         """
-        # 直接调用position_mgr的方法
-        result = self.position_mgr.get_position_history(start_date, end_date, symbol, limit)
-        if result:
-            # 添加调试日志
-            self.logger.info(f"获取历史仓位记录成功: {len(result)}条")
-        else:
-            self.logger.warning("获取历史仓位记录为空")
-        return result 
+        return await self.strategy.get_position_history(start_date, end_date, symbol, limit)

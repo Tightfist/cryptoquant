@@ -648,23 +648,53 @@
                         backgroundColor: 'rgba(54, 162, 235, 0.2)',
                         borderWidth: 2,
                         fill: true,
-                        tension: 0.1
+                        tension: 0.1,
+                        yAxisID: 'y'
+                    }, {
+                        label: 'BTC价格变化',
+                        data: [],
+                        borderColor: 'rgb(255, 159, 64)',
+                        backgroundColor: 'rgba(255, 159, 64, 0.0)',
+                        borderWidth: 2,
+                        borderDash: [5, 5],
+                        fill: false,
+                        tension: 0.1,
+                        yAxisID: 'y1'
                     }]
                 },
                 options: {
                     responsive: true,
                     maintainAspectRatio: false,
+                    interaction: {
+                        mode: 'index',
+                        intersect: false,
+                    },
                     scales: {
                         x: {
                             title: {
                                 display: true,
-                                text: '平仓时间'
+                                text: '时间'
                             }
                         },
                         y: {
+                            type: 'linear',
+                            display: true,
+                            position: 'left',
                             title: {
                                 display: true,
                                 text: '累计收益(USDT)'
+                            }
+                        },
+                        y1: {
+                            type: 'linear',
+                            display: true,
+                            position: 'right',
+                            title: {
+                                display: true,
+                                text: 'BTC价格($)'
+                            },
+                            grid: {
+                                drawOnChartArea: false,
                             }
                         }
                     },
@@ -672,9 +702,19 @@
                         tooltip: {
                             callbacks: {
                                 label: function(context) {
-                                    return `收益: ${context.raw.toFixed(2)} USDT`;
+                                    const datasetIndex = context.datasetIndex;
+                                    const value = context.raw;
+                                    if (datasetIndex === 0) {
+                                        return `收益: ${value.toFixed(2)} USDT`;
+                                    } else if (datasetIndex === 1) {
+                                        return `BTC: $${value.toFixed(2)}`;
+                                    }
+                                    return `${context.dataset.label}: ${value}`;
                                 }
                             }
+                        },
+                        legend: {
+                            position: 'top',
                         }
                     }
                 }
@@ -683,19 +723,104 @@
         
         // 加载今日收益数据
         function loadDailyPnlData() {
-            // 直接使用历史仓位数据，无需额外API请求
-            fetchWithAuth(`${API_BASE_PATH}/position_history`)
+            // 先获取BTC价格数据
+            fetchWithAuth(`${API_BASE_PATH}/btc_price_today`)
                 .then(data => {
                     if (data.success && data.data) {
-                        // 使用历史仓位数据生成收益曲线
-                        generateDailyPnlChartData(data.data);
+                        // 将BTC价格数据存储起来，等收益数据加载后一起处理
+                        window.btcPriceData = data.data;
+                        
+                        // 如果没有收益数据，直接显示BTC价格图表
+                        if (dailyPnlChart.data.datasets[0].data.length <= 1) {
+                            displayOnlyBtcChart(data.data);
+                        }
                     } else {
-                        console.error('获取历史仓位数据失败:', data.message);
+                        console.error('获取BTC价格数据失败:', data.message);
                     }
+                    
+                    // 获取历史仓位数据用于收益曲线
+                    fetchWithAuth(`${API_BASE_PATH}/position_history`)
+                        .then(posData => {
+                            if (posData.success && posData.data) {
+                                // 使用历史仓位数据生成收益曲线
+                                generateDailyPnlChartData(posData.data);
+                            } else {
+                                console.error('获取历史仓位数据失败:', posData.message);
+                            }
+                        })
+                        .catch(error => {
+                            console.error('API请求异常:', error);
+                        });
                 })
                 .catch(error => {
-                    console.error('API请求异常:', error);
+                    console.error('获取BTC价格API请求异常:', error);
+                    
+                    // 即使BTC价格获取失败，也要尝试获取仓位数据
+                    fetchWithAuth(`${API_BASE_PATH}/position_history`)
+                        .then(posData => {
+                            if (posData.success && posData.data) {
+                                generateDailyPnlChartData(posData.data);
+                            } else {
+                                console.error('获取历史仓位数据失败:', posData.message);
+                            }
+                        })
+                        .catch(error => {
+                            console.error('API请求异常:', error);
+                        });
                 });
+        }
+        
+        // 显示只有BTC价格的图表
+        function displayOnlyBtcChart(data) {
+            if (!dailyPnlChart || !data || data.length === 0) {
+                return;
+            }
+            
+            // 排序数据确保时间顺序
+            const sortedData = data.slice().sort((a, b) => a.timestamp - b.timestamp);
+            
+            // 检查时间是否覆盖了24小时
+            // 获取今日0点时间
+            const today = new Date();
+            today.setHours(0, 0, 0, 0);
+            const todayTimestamp = today.getTime();
+            
+            // 如果第一个数据点不是0点附近，添加0点数据（使用第一个价格）
+            if (sortedData.length > 0 && sortedData[0].timestamp - todayTimestamp > 3600000) { // 超过1小时
+                console.log("BTC数据不包含0点，添加0点数据");
+                sortedData.unshift({
+                    timestamp: todayTimestamp,
+                    price: sortedData[0].price
+                });
+            }
+            
+            // 如果最后一个数据点不接近现在时间，添加当前时间数据点（使用最后一个价格）
+            const now = new Date().getTime();
+            if (sortedData.length > 0 && now - sortedData[sortedData.length-1].timestamp > 3600000) { // 超过1小时
+                console.log("BTC数据不包含最近时间，添加当前时间数据点");
+                sortedData.push({
+                    timestamp: now,
+                    price: sortedData[sortedData.length-1].price
+                });
+            }
+            
+            // 从排序后的数据中提取时间和价格
+            const timestamps = sortedData.map(item => item.timestamp);
+            const prices = sortedData.map(item => item.price);
+            
+            // 时间格式化
+            const btcLabels = timestamps.map(ts => {
+                const date = new Date(ts);
+                return date.getHours().toString().padStart(2, '0') + ':' + 
+                      date.getMinutes().toString().padStart(2, '0');
+            });
+            
+            // 更新图表
+            dailyPnlChart.data.labels = btcLabels;
+            dailyPnlChart.data.datasets[0].data = new Array(prices.length).fill(0);
+            dailyPnlChart.data.datasets[1].data = prices;
+            
+            dailyPnlChart.update();
         }
         
         // 从历史仓位数据生成今日收益曲线数据
@@ -711,9 +836,11 @@
                 return position.exit_timestamp && position.exit_timestamp >= todayTimestamp;
             });
             
-            // 如果今日没有平仓记录，显示空图表
+            // 如果今日没有平仓记录，显示BTC价格图表
             if (todayPositions.length === 0) {
-                updateDailyPnlChart([]);
+                if (window.btcPriceData) {
+                    displayOnlyBtcChart(window.btcPriceData);
+                }
                 return;
             }
             
@@ -743,15 +870,98 @@
                 });
             }
             
-            // 更新图表
-            updateDailyPnlChart(chartData);
+            // 将BTC价格数据映射到收益图表的时间轴上
+            if (window.btcPriceData && window.btcPriceData.length > 0) {
+                combineBtcAndProfitData(chartData, window.btcPriceData);
+            } else {
+                // 如果没有BTC价格数据，只显示收益数据
+                updateProfitPart(chartData);
+            }
             
             // 调试信息
             console.log(`今日累计收益图表数据: ${chartData.length}个数据点，最终收益: ${cumulativePnl.toFixed(2)} USDT`);
         }
         
-        // 更新收益曲线图
-        function updateDailyPnlChart(data) {
+        // 合并BTC价格和收益数据
+        function combineBtcAndProfitData(profitData, btcData) {
+            if (!dailyPnlChart || !profitData || profitData.length === 0 || !btcData || btcData.length === 0) {
+                return;
+            }
+            
+            // 提取收益数据的时间戳和值
+            const profitTimestamps = profitData.map(item => item.timestamp);
+            const profitValues = profitData.map(item => item.cumulative_pnl);
+            
+            // 排序BTC数据
+            const sortedBtcData = btcData.slice().sort((a, b) => a.timestamp - b.timestamp);
+            
+            // 构建时间点合集（每个小时一个点)
+            // 获取今日0点和明日0点
+            const today = new Date();
+            today.setHours(0, 0, 0, 0);
+            const todayTimestamp = today.getTime();
+            
+            const tomorrow = new Date(today);
+            tomorrow.setDate(tomorrow.getDate() + 1);
+            const tomorrowTimestamp = tomorrow.getTime();
+            
+            // 创建小时时间点数组（24个点，从0:00到23:00）
+            const hourTimestamps = [];
+            const hourLabels = [];
+            
+            for (let hour = 0; hour < 24; hour++) {
+                const timestamp = todayTimestamp + hour * 3600 * 1000;
+                hourTimestamps.push(timestamp);
+                hourLabels.push(`${hour.toString().padStart(2, '0')}:00`);
+            }
+            
+            // 为每个小时时间点找最近的BTC价格
+            const btcHourlyPrices = hourTimestamps.map(timestamp => {
+                let closestBtc = sortedBtcData[0];
+                let minDiff = Math.abs(sortedBtcData[0].timestamp - timestamp);
+                
+                for (const btc of sortedBtcData) {
+                    const diff = Math.abs(btc.timestamp - timestamp);
+                    if (diff < minDiff) {
+                        minDiff = diff;
+                        closestBtc = btc;
+                    }
+                }
+                
+                return closestBtc ? closestBtc.price : null;
+            });
+            
+            // 为每个小时时间点找最近的收益值
+            const profitHourlyValues = hourTimestamps.map(timestamp => {
+                // 找到所有在这个小时前的平仓记录
+                const validProfits = profitData.filter(item => item.timestamp <= timestamp);
+                
+                if (validProfits.length === 0) {
+                    return 0; // 如果没有平仓记录，收益为0
+                }
+                
+                // 返回最后一个记录的累计收益
+                return validProfits[validProfits.length - 1].cumulative_pnl;
+            });
+            
+            // 更新图表
+            dailyPnlChart.data.labels = hourLabels;
+            dailyPnlChart.data.datasets[0].data = profitHourlyValues;
+            dailyPnlChart.data.datasets[1].data = btcHourlyPrices;
+            
+            // 设置颜色 - 如果最终收益为正，使用绿色，否则使用红色
+            const finalValue = profitHourlyValues[profitHourlyValues.length - 1] || 0;
+            const borderColor = finalValue >= 0 ? 'rgb(40, 167, 69)' : 'rgb(220, 53, 69)';
+            const backgroundColor = finalValue >= 0 ? 'rgba(40, 167, 69, 0.2)' : 'rgba(220, 53, 69, 0.2)';
+            
+            dailyPnlChart.data.datasets[0].borderColor = borderColor;
+            dailyPnlChart.data.datasets[0].backgroundColor = backgroundColor;
+            
+            dailyPnlChart.update();
+        }
+        
+        // 更新图表中的利润部分 (当没有BTC数据时使用)
+        function updateProfitPart(data) {
             if (!dailyPnlChart) {
                 console.error('图表未初始化');
                 return;
@@ -766,6 +976,7 @@
                 
                 dailyPnlChart.data.labels = ['00:00', now.getHours().toString().padStart(2, '0') + ':' + now.getMinutes().toString().padStart(2, '0')];
                 dailyPnlChart.data.datasets[0].data = [0, 0];
+                dailyPnlChart.data.datasets[0].timestamps = [today.getTime(), now.getTime()];
                 dailyPnlChart.update();
                 return;
             }
@@ -778,10 +989,12 @@
             });
             
             const values = data.map(item => item.cumulative_pnl);
+            const timestamps = data.map(item => item.timestamp);
             
             // 更新图表
             dailyPnlChart.data.labels = labels;
             dailyPnlChart.data.datasets[0].data = values;
+            dailyPnlChart.data.datasets[0].timestamps = timestamps;  // 保存时间戳信息
             
             // 设置颜色 - 如果最终收益为正，使用绿色，否则使用红色
             const finalValue = values[values.length - 1] || 0;

@@ -336,6 +336,33 @@ class OKExDataCache(DataCache):
             self.logger.error(f"获取标记价格异常: {e}", exc_info=True)
             return 0.0
     
+    def get_mark_price_sync(self, inst_id: str) -> float:
+        """
+        获取标记价格的同步版本，优先从缓存获取，如果缓存不可用则直接从API获取
+        
+        Args:
+            inst_id: 交易对ID
+            
+        Returns:
+            float: 标记价格
+        """
+        try:
+            # 首先尝试从缓存获取
+            if not self._direct_trader:
+                self._init_trader()
+                
+            # 使用API直接获取
+            if self._direct_trader:
+                mark_price = self._direct_trader.get_mark_price(inst_id)
+                if mark_price > 0:
+                    return mark_price
+            
+            self.logger.warning(f"无法获取{inst_id}的标记价格")
+            return 0.0
+        except Exception as e:
+            self.logger.error(f"同步获取{inst_id}标记价格异常: {e}")
+            return 0.0
+    
     async def get_funding_rate(self, inst_id: str) -> float:
         """
         获取资金费率
