@@ -5,6 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>交易系统 - 仓位管理</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/css/bootstrap.min.css" rel="stylesheet">
+    <!-- 添加jQuery库 -->
+    <script src="https://cdn.jsdelivr.net/npm/jquery@3.6.4/dist/jquery.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
         .profit {
@@ -105,12 +107,56 @@
             </div>
         </div>
 
+        <!-- 添加持仓同步按钮 -->
+        <div class="row mb-3">
+            <div class="col">
+                <button id="syncPositionsBtn" class="btn btn-outline-primary btn-sm">
+                    <i class="fas fa-sync-alt"></i> 同步持仓数据
+                </button>
+                <span id="lastSyncTime" class="text-muted ml-2" style="font-size: 0.8rem;"></span>
+            </div>
+        </div>
+
+        <!-- 添加持仓数据表格 -->
+        <div class="row">
+            <div class="col">
+                <div class="card">
+                    <div class="card-header">
+                        <h5 class="card-title mb-0">当前持仓</h5>
+                    </div>
+                    <div class="card-body p-0">
+                        <div class="table-responsive">
+                            <table id="positionsTable" class="table table-striped table-sm">
+                                <thead>
+                                    <tr>
+                                        <th>合约</th>
+                                        <th>方向</th>
+                                        <th>保证金</th>
+                                        <th>杠杆</th>
+                                        <th>入场价</th>
+                                        <th>当前价</th>
+                                        <th>止盈价</th>
+                                        <th>止损价</th>
+                                        <th>浮动盈亏</th>
+                                        <th>已实现盈亏</th>
+                                        <th>止盈进度</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <tr>
+                                        <td colspan="11" class="text-center">载入中...</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
         <div class="row" id="positionsContainer">
             <div class="col-12 text-center py-5">
-                <div class="spinner-border text-primary" role="status">
-                    <span class="visually-hidden">Loading...</span>
-                </div>
-                <p class="mt-2">正在加载仓位数据...</p>
+                <p>当前没有持仓</p>
             </div>
         </div>
 
@@ -161,6 +207,7 @@
                 </div>
                 <div class="modal-body">
                     <p>确定要关闭 <span id="closeSymbol" class="fw-bold"></span> 的仓位吗？</p>
+                    <span id="closePositionSymbol" style="display:none;"></span>
                 </div>
                 <div class="modal-footer">
                     <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
@@ -189,7 +236,10 @@
         </div>
     </div>
 
+    <!-- 引用Bootstrap JS和FontAwesome -->
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/js/all.min.js"></script>
+
     <script>
         // API基础路径
         const API_BASE_PATH = '/api'; // 根据实际配置修改
@@ -198,6 +248,9 @@
 
         // 当前选中的symbol
         let selectedSymbol = '';
+        
+        // 同步状态
+        let isSyncing = false;
         
         // 初始化Bootstrap模态框
         const closePositionModal = new bootstrap.Modal(document.getElementById('closePositionModal'));
@@ -211,65 +264,137 @@
         // 图表相关变量
         let dailyPnlChart = null;
         
-        // 页面加载完成后执行
+        // 页面加载完成后初始化
         document.addEventListener('DOMContentLoaded', function() {
-            // 获取认证信息
+            // 初始化各种变量
             authToken = localStorage.getItem('auth_token');
-            currentUser = localStorage.getItem('username');
-            userRole = localStorage.getItem('role');
             
-            // 检查认证状态
-            if (!authToken) {
-                // 未登录，跳转到登录页面
-                window.location.href = `${PAGE_BASE_PATH}/login.html`;
-                return;
+            // 添加updateUserInfo函数定义
+            // 更新用户信息显示
+            function updateUserInfo() {
+                // 从localStorage获取用户信息
+                currentUser = localStorage.getItem('username');
+                userRole = localStorage.getItem('role');
+                
+                // 显示用户信息
+                document.getElementById('userDisplay').textContent = currentUser || '未知用户';
+                document.getElementById('roleDisplay').textContent = userRole || '无角色';
+                
+                // 检查认证状态
+                if (!authToken) {
+                    // 未登录，跳转到登录页面
+                    window.location.href = `${PAGE_BASE_PATH}/login.html`;
+                    return;
+                }
             }
             
-            // 显示用户信息
-            document.getElementById('userDisplay').textContent = currentUser || '未知用户';
-            document.getElementById('roleDisplay').textContent = userRole || '无角色';
+            updateUserInfo();
+            
+            // 首先立即清除所有加载状态，防止页面卡在"加载中..."
+            clearLoadingState();
             
             // 初始化图表
             initDailyPnlChart();
             
-            // 加载数据
-            loadOpenPositions();
-            loadPositionHistory();
-            loadDailyPnlData();
+            console.log("DOM已加载，开始初始化数据...");
+            
+            // 调整加载顺序，解决标签页刷新问题
+            // 1. 首先加载历史数据并计算统计值
+            loadPositionHistoryAndStats()
+                .then(() => {
+                    console.log("历史数据和统计值加载完成");
+                    
+                    // 2. 然后同步持仓数据
+                    return syncPositions();
+                })
+                .then(() => {
+                    // 3. 同步完成后加载持仓数据
+                    console.log("同步持仓完成，加载最新持仓数据");
+            loadPositions(); 
+                })
+                .catch(error => {
+                    console.error("数据加载过程中发生错误:", error);
+                    // 出错也要尝试加载持仓数据
+                    loadPositions();
+                });
+            
+            // 设置事件处理
+            setupEventHandlers();
+            
+            // 定时刷新数据
+            setInterval(function() {
+                console.log("定时刷新触发");
+                // 注意顺序：先加载历史数据计算统计值，再加载持仓数据
+                loadPositionHistoryAndStats()
+                    .then(() => {
+                        console.log("定时刷新：历史数据加载完成，正在加载持仓数据");
+                loadPositions();
+                    })
+                    .catch(error => {
+                        console.error("定时刷新数据时发生错误:", error);
+                        // 出错也尝试加载持仓数据
+                        loadPositions();
+                    });
+            }, 30000);
+        });
+        
+        // 注册事件处理
+        function setupEventHandlers() {
+            // 使用事件委托处理平仓按钮点击
+            document.addEventListener('click', function(e) {
+                if (e.target && e.target.classList.contains('btn-close-position')) {
+                    const symbol = e.target.dataset.symbol;
+                    if (symbol) {
+                        console.log(`平仓按钮被点击: ${symbol}`);
+                        showCloseConfirmModal(symbol);
+                    }
+                }
+            });
+            
+            // 设置确认平仓事件
+            document.getElementById('confirmCloseBtn').addEventListener('click', function() {
+                const symbol = document.getElementById('closePositionSymbol').textContent;
+                console.log(`确认平仓按钮被点击: ${symbol}`);
+                closePosition(symbol);
+            });
             
             // 设置刷新按钮事件
             document.getElementById('refreshBtn').addEventListener('click', function() {
-                loadOpenPositions();
-                loadPositionHistory();
-                loadDailyPnlData();
+                console.log("刷新按钮被点击，开始刷新数据...");
+                // 显示加载状态
+                startLoading();
+                
+                // 注意顺序：先加载历史数据计算统计值，再加载持仓数据
+                loadPositionHistoryAndStats().then(() => {
+                    console.log("历史数据加载完成，正在加载持仓数据...");
+                    loadPositions();
+                }).catch(error => {
+                    console.error("刷新数据时发生错误:", error);
+                    // 出错也尝试加载持仓数据
+                    loadPositions();
+                });
             });
             
-            // 设置关闭所有仓位按钮事件
+            // 设置一键平仓按钮事件
             document.getElementById('closeAllBtn').addEventListener('click', function() {
+                console.log("一键平仓按钮被点击");
                 closeAllModal.show();
             });
             
-            // 确认关闭指定仓位
-            document.getElementById('confirmCloseBtn').addEventListener('click', function() {
-                closePosition(selectedSymbol);
-                closePositionModal.hide();
-            });
-            
-            // 确认关闭所有仓位
+            // 设置确认一键平仓事件
             document.getElementById('confirmCloseAllBtn').addEventListener('click', function() {
+                console.log("确认一键平仓按钮被点击");
                 closeAllPositions();
-                closeAllModal.hide();
             });
             
-            // 登出按钮事件
-            document.getElementById('logoutBtn').addEventListener('click', logout);
-            
-            // 设置自动刷新（每30秒）
-            setInterval(function() {
-                loadOpenPositions();
-                loadDailyPnlData();
-            }, 30000);
-        });
+            // 设置退出登录按钮事件
+            document.getElementById('logoutBtn').addEventListener('click', function() {
+                console.log("退出登录按钮被点击");
+                localStorage.removeItem('auth_token');
+                localStorage.removeItem('user_info');
+                window.location.href = '/login.html';
+            });
+        }
         
         // 带认证的Fetch请求
         function fetchWithAuth(url, options = {}) {
@@ -300,137 +425,85 @@
         
         // 加载未平仓仓位
         function loadOpenPositions() {
-            fetchWithAuth(`${API_BASE_PATH}/open_positions`)
-                .then(data => {
-                    if (data.success) {
-                        renderOpenPositions(data.data);
-                        updateSummary(data.data);
-                    } else {
-                        console.error('加载未平仓仓位失败:', data.message);
-                    }
-                })
-                .catch(error => {
-                    console.error('API请求异常:', error);
-                });
+            loadPositions(); // 使用新的统一加载函数
         }
         
-        // 加载历史仓位
-        function loadPositionHistory() {
-            fetchWithAuth(`${API_BASE_PATH}/position_history`)
+        // 加载历史仓位并更新统计数据
+        function loadPositionHistoryAndStats() {
+            console.log("开始加载历史仓位数据...");
+            
+            // 不传任何日期参数，后端会默认使用当天日期
+            const url = `/api/position_history`;
+            
+            // 显示加载状态
+            document.getElementById('historyTableBody').innerHTML = '<tr><td colspan="10" class="text-center">载入中...</td></tr>';
+            
+            // 使用认证请求,并返回Promise以便链式调用
+            return fetchWithAuth(url)
                 .then(data => {
-                    console.log("历史仓位API返回数据:", data);
                     if (data.success) {
-                        // 调试输出
-                        console.log(`获取到 ${data.data.length} 条历史仓位数据`);
-                        if (data.data.length > 0) {
-                            console.log("第一条记录:", data.data[0]);
-                        }
+                        // 渲染历史仓位表格
                         renderPositionHistory(data.data);
+                        
+                        // 计算今日总盈亏和胜率
+                        calculateTodayStats(data.data);
+                        
+                        // 额外加载BTC价格数据用于图表
+                        return fetchWithAuth(`${API_BASE_PATH}/btc_price_today`)
+                            .then(btcData => {
+                                if (btcData.success && btcData.data) {
+                                    window.btcPriceData = btcData.data;
+                                    
+                                    // 生成收益曲线图（与BTC价格一起）
+                                    generateDailyPnlChartData(data.data);
+                                } else {
+                                    console.error("获取BTC价格数据失败:", btcData.message);
+                                    // 无BTC数据时也生成收益曲线
+                                    generateDailyPnlChartData(data.data);
+                                }
+                                return data; // 返回原始数据继续传递
+                            })
+                            .catch(error => {
+                                console.error("获取BTC价格数据异常:", error);
+                                // 发生异常时也生成收益曲线
+                                generateDailyPnlChartData(data.data);
+                                return data; // 返回原始数据继续传递
+                            });
                     } else {
-                        console.error('加载历史仓位失败:', data.message);
+                        document.getElementById('historyTableBody').innerHTML = `
+                            <tr>
+                                <td colspan="10" class="text-center text-danger">
+                                    加载失败: ${data.message || '未知错误'}
+                                </td>
+                            </tr>
+                        `;
+                        console.error("加载历史仓位数据失败:", data.message);
+                        
+                        // 设置默认值
+                        document.getElementById('todayPnl').textContent = '0.00 USDT';
+                        document.getElementById('winRate').textContent = '0.00%';
+                        
+                        // 返回一个失败状态
+                        return Promise.reject(new Error(data.message || '加载历史数据失败'));
                     }
                 })
                 .catch(error => {
-                    console.error('API请求异常:', error);
+                    document.getElementById('historyTableBody').innerHTML = `
+                        <tr>
+                            <td colspan="10" class="text-center text-danger">
+                                加载异常: ${error.message || '未知错误'}
+                            </td>
+                        </tr>
+                    `;
+                    console.error("加载历史仓位数据异常:", error);
+                    
+                    // 设置默认值
+                    document.getElementById('todayPnl').textContent = '0.00 USDT';
+                    document.getElementById('winRate').textContent = '0.00%';
+                    
+                    // 返回被拒绝的Promise
+                    return Promise.reject(error);
                 });
-        }
-        
-        // 渲染未平仓仓位
-        function renderOpenPositions(positions) {
-            const container = document.getElementById('positionsContainer');
-            
-            if (!positions || positions.length === 0) {
-                container.innerHTML = '<div class="col-12 text-center py-5"><p>当前没有持仓</p></div>';
-                return;
-            }
-            
-            let html = '';
-            
-            positions.forEach(position => {
-                const pnlClass = position.leveraged_pnl_pct >= 0 ? 'profit' : 'loss';
-                const pnlPercent = (position.leveraged_pnl_pct * 100).toFixed(2);
-                const pnlAmount = position.pnl_amount ? position.pnl_amount.toFixed(2) : '0.00';
-                const ladderActive = position.ladder_tp === true ? '已启用' : '未启用';
-                const ladderClass = position.ladder_tp === true ? 'text-success' : 'text-muted';
-                const ladderClosed = position.ladder_closed_pct ? (position.ladder_closed_pct * 100).toFixed(0) : '0';
-                
-                // 调试输出
-                console.log(`仓位 ${position.symbol} 阶梯止盈状态:`, position.ladder_tp);
-                console.log(`仓位 ${position.symbol} 止盈价格:`, position.take_profit_price);
-                console.log(`仓位 ${position.symbol} 止损价格:`, position.stop_loss_price);
-                
-                html += `
-                <div class="col-md-4 mb-4">
-                    <div class="card position-card">
-                        <div class="card-header d-flex justify-content-between align-items-center">
-                            <h5 class="mb-0">${position.symbol}</h5>
-                            <span class="badge ${position.direction === 'long' ? 'bg-success' : 'bg-danger'}">${position.direction === 'long' ? '多' : '空'}</span>
-                        </div>
-                        <div class="card-body">
-                            <div class="d-flex justify-content-between mb-3">
-                                <div>入场价:</div>
-                                <div>${position.entry_price}</div>
-                            </div>
-                            <div class="d-flex justify-content-between mb-3">
-                                <div>当前价:</div>
-                                <div>${position.current_price || '未知'}</div>
-                            </div>
-                            <div class="d-flex justify-content-between mb-3">
-                                <div>保证金(USDT):</div>
-                                <div>${position.margin ? position.margin.toFixed(2) : '0.00'}</div>
-                            </div>
-                            <div class="d-flex justify-content-between mb-3">
-                                <div>杠杆:</div>
-                                <div>${position.leverage}x</div>
-                            </div>
-                            <div class="d-flex justify-content-between mb-3">
-                                <div>止盈价:</div>
-                                <div>${typeof position.take_profit_price === 'number' && position.take_profit_price > 0 ? position.take_profit_price.toFixed(4) : '未设置'}</div>
-                            </div>
-                            <div class="d-flex justify-content-between mb-3">
-                                <div>止损价:</div>
-                                <div>${typeof position.stop_loss_price === 'number' && position.stop_loss_price > 0 ? position.stop_loss_price.toFixed(4) : '未设置'}</div>
-                            </div>
-                            <div class="d-flex justify-content-between mb-3">
-                                <div>阶梯止盈:</div>
-                                <div class="${ladderClass}">${ladderActive}</div>
-                            </div>
-                            ${position.ladder_tp ? `
-                            <div class="mb-3">
-                                <small>已平仓比例: ${ladderClosed}%</small>
-                                <div class="progress ladder-progress">
-                                    <div class="progress-bar bg-success" role="progressbar" style="width: ${ladderClosed}%" aria-valuenow="${ladderClosed}" aria-valuemin="0" aria-valuemax="100"></div>
-                                </div>
-                            </div>` : ''}
-                            ${position.realized_pnl ? `
-                            <div class="d-flex justify-content-between mb-3">
-                                <div>未实现盈亏:</div>
-                                <div class="${pnlClass}">${position.unrealized_pnl ? position.unrealized_pnl.toFixed(2) : '0.00'} USDT</div>
-                            </div>
-                            <div class="d-flex justify-content-between mb-3">
-                                <div>已实现盈亏:</div>
-                                <div class="${position.realized_pnl >= 0 ? 'profit' : 'loss'}">${position.realized_pnl.toFixed(2)} USDT</div>
-                            </div>` : ''}
-                            <div class="d-flex justify-content-between mb-3">
-                                <div>盈亏:</div>
-                                <div class="${pnlClass}">${pnlAmount} USDT (${pnlPercent}%)</div>
-                            </div>
-                            <button class="btn btn-outline-danger w-100 mt-2 close-btn" data-symbol="${position.symbol}">平仓</button>
-                        </div>
-                    </div>
-                </div>`;
-            });
-            
-            container.innerHTML = html;
-            
-            // 添加平仓按钮事件
-            document.querySelectorAll('.close-btn').forEach(btn => {
-                btn.addEventListener('click', function() {
-                    selectedSymbol = this.getAttribute('data-symbol');
-                    document.getElementById('closeSymbol').textContent = selectedSymbol;
-                    closePositionModal.show();
-                });
-            });
         }
         
         // 渲染历史仓位
@@ -447,17 +520,21 @@
             // 对仓位按照平仓时间倒序排序（最新的在前面）
             positions.sort((a, b) => (b.exit_timestamp || 0) - (a.exit_timestamp || 0));
             
+            // 计算起始序号，使序号倒序排列（最早的交易序号为1）
+            const startNum = positions.length;
+            
             positions.forEach((position, index) => {
-                // 确保只处理已平仓的仓位
-                if (!position.closed && position.exit_timestamp <= 0) return;
+                // 确保只处理已平仓的仓位 - 放宽条件，不再检查closed字段
+                if (position.exit_timestamp <= 0) return;
                 
-                const sequenceNumber = positions.length - index; // 最新的仓位序号最大
-                const pnlClass = position.pnl_amount >= 0 ? 'profit' : 'loss';
+                // 序号倒序，最早的是1，最晚的是总数
+                const sequenceNumber = startNum - index; // 倒序序号
+                const pnlClass = (position.pnl_amount >= 0) ? 'profit' : 'loss';
                 const pnlAmount = position.pnl_amount ? position.pnl_amount.toFixed(2) : '0.00';
                 const pnlPercentage = position.pnl_percentage ? position.pnl_percentage.toFixed(2) : '0.00';
                 const direction = position.direction || (position.quantity > 0 ? 'long' : 'short');
                 const directionText = direction === 'long' ? '多' : '空';
-                const exitTimeStr = position.exit_time || new Date(position.exit_timestamp).toLocaleString();
+                const exitTimeStr = position.exit_time || formatDateTime(position.exit_timestamp);
                 
                 html += `
                 <tr>
@@ -470,76 +547,53 @@
                     <td>${Math.abs(position.quantity)}</td>
                     <td>${position.leverage}x</td>
                     <td class="${pnlClass}">${pnlAmount} (${pnlPercentage}%)</td>
-                    <td>${formatHoldingTime(position.entry_timestamp || position.timestamp, position.exit_timestamp)}</td>
+                    <td>${position.holding_time || formatHoldingTime(position.entry_timestamp || position.timestamp, position.exit_timestamp)}</td>
                 </tr>`;
             });
             
             if (html === '') {
-                tableBody.innerHTML = '<tr><td colspan="10" class="text-center">没有历史仓位数据</td></tr>';
+                tableBody.innerHTML = '<tr><td colspan="10" class="text-center">没有符合条件的历史仓位数据</td></tr>';
             } else {
                 tableBody.innerHTML = html;
             }
         }
         
-        // 更新统计信息
+        // 更新统计摘要信息
         function updateSummary(positions) {
-            // 设置默认值
-            document.getElementById('totalPositions').textContent = positions && positions.length || '0';
+            // 设置持仓数量
+            const positionCount = positions.length || 0;
+            $('#totalPositions').text(positionCount);
             
-            let totalPnlAmount = 0;
-            let totalPnlPct = 0;
-            
-            // 计算浮动盈亏
-            if (positions && positions.length > 0) {
-                positions.forEach(position => {
-                    if (position.pnl_amount) {
-                        totalPnlAmount += position.pnl_amount;
-                    }
-                    if (position.leveraged_pnl_pct) {
-                        totalPnlPct += position.leveraged_pnl_pct;
-                    }
-                });
-                
-                // 计算平均盈亏百分比
-                const avgPnlPct = totalPnlPct / positions.length;
-                
-                // 更新浮动盈亏显示
-                document.getElementById('totalPnl').textContent = `${totalPnlAmount.toFixed(2)} USDT (${(avgPnlPct * 100).toFixed(2)}%)`;
-                // 添加颜色
-                document.getElementById('totalPnl').className = totalPnlAmount >= 0 ? 'card-text profit' : 'card-text loss';
-            } else {
-                // 没有持仓时设置浮动盈亏为0
-                document.getElementById('totalPnl').textContent = '0.00 USDT (0.00%)';
-                document.getElementById('totalPnl').className = 'card-text';
+            if (positionCount === 0) {
+                // 如果没有持仓，将浮动盈亏设为0，但不修改今日总盈亏和胜率
+                $('#totalPnl').text('0.00');
+                // 不再重置今日总盈亏和胜率
+                // $('#todayPnl').text('0.00');
+                // $('#winRate').text('0%');
+                $('#avgProfit').text('0.00');
+                $('#maxDrawdown').text('0.00');
+                return;
             }
-                
-            // 获取当日收益和胜率信息 - 无论是否有持仓都需要获取
-            fetchWithAuth(`${API_BASE_PATH}/daily_pnl`)
-                .then(data => {
-                    if (data.success && data.data) {
-                        const todayPnl = parseFloat(data.data.today_pnl || 0);
-                        
-                        // 无论是否有持仓，都显示当日已实现盈亏
-                        const todayPnlDisplay = todayPnl.toFixed(2) + ' USDT';
-                        document.getElementById('todayPnl').textContent = todayPnlDisplay;
-                        document.getElementById('todayPnl').className = todayPnl >= 0 ? 'card-text profit' : 'card-text loss';
-                        
-                        const winRate = data.data.win_rate || 0;
-                        document.getElementById('winRate').textContent = winRate.toFixed(2) + '%';
-                    } else {
-                        document.getElementById('todayPnl').textContent = '0.00 USDT';
-                        document.getElementById('winRate').textContent = '0.00%';
-                    }
-                })
-                .catch(error => {
-                    console.error('获取日盈亏数据失败:', error);
-                    document.getElementById('todayPnl').textContent = '加载失败';
-                    document.getElementById('winRate').textContent = '加载失败';
-                });
+
+            // 计算总的浮动盈亏
+            let totalUnrealizedPnl = 0;
+            positions.forEach(position => {
+                if (!position.closed) {
+                    const unrealizedPnl = position.unrealized_pnl || position.pnl_amount || 0;
+                    totalUnrealizedPnl += parseFloat(unrealizedPnl);
+                }
+            });
+            
+            $('#totalPnl').text(totalUnrealizedPnl.toFixed(2));
+            
+            // 不再重置和标记今日总盈亏和胜率为"加载中..."
+            // $('#todayPnl').text('加载中...'); 
+            // $('#winRate').text('加载中...'); 
         }
         
         // 平仓特定交易对
         function closePosition(symbol) {
+            console.log(`开始平仓操作: ${symbol}`);
             fetchWithAuth(`${API_BASE_PATH}/trigger`, {
                 method: 'POST',
                 headers: {
@@ -551,19 +605,47 @@
                 })
             })
             .then(data => {
+                console.log(`平仓请求响应:`, data);
                 if (data.success) {
-                    alert(`已成功平仓 ${symbol}`);
-                    loadOpenPositions();
-                    loadPositionHistory();
-                    loadDailyPnlData();
+                    showToast('平仓成功', `${symbol} 平仓请求已处理`, 'success');
+                    // 关闭模态框
+                    closePositionModal.hide();
+                    // 重新加载持仓数据
+                    setTimeout(() => {
+                        // 先加载历史数据计算统计值，再加载持仓数据
+                        loadPositionHistoryAndStats();
+                        setTimeout(() => {
+                            loadPositions();
+                        }, 500);
+                    }, 1000);
                 } else {
-                    alert(`平仓失败: ${data.message}`);
+                    showToast('平仓失败', data.message || '请求处理失败', 'danger');
                 }
             })
             .catch(error => {
-                console.error('API请求异常:', error);
-                alert('平仓请求发送失败，请查看控制台了解详情');
+                console.error('平仓请求异常:', error);
+                showToast('平仓异常', error.message || '请求发送失败', 'danger');
             });
+        }
+        
+        // 显示平仓确认对话框
+        function showCloseConfirmModal(symbol) {
+            console.log(`显示平仓确认对话框: ${symbol}`);
+            try {
+                // 设置要平仓的交易对
+                document.getElementById('closeSymbol').textContent = symbol;
+                document.getElementById('closePositionSymbol').textContent = symbol;
+                
+                // 显示确认对话框
+                closePositionModal.show();
+                
+                // 添加调试日志
+                console.log(`平仓确认对话框已显示，交易对: ${symbol}`);
+            } catch (error) {
+                console.error(`显示平仓确认对话框失败: ${error}`);
+                // 如果显示对话框失败，直接尝试平仓
+                closePosition(symbol);
+            }
         }
         
         // 平仓所有持仓
@@ -578,9 +660,13 @@
             .then(data => {
                 if (data.success) {
                     alert('已成功平仓所有持仓');
+                    // 先加载历史数据计算统计值，再加载持仓数据
+                    setTimeout(() => {
+                        loadPositionHistoryAndStats();
+                        setTimeout(() => {
                     loadOpenPositions();
-                    loadPositionHistory();
-                    loadDailyPnlData();
+                        }, 500);
+                    }, 1000);
                 } else {
                     alert(`平仓失败: ${data.message}`);
                 }
@@ -721,53 +807,44 @@
             });
         }
         
-        // 加载今日收益数据
-        function loadDailyPnlData() {
-            // 先获取BTC价格数据
-            fetchWithAuth(`${API_BASE_PATH}/btc_price_today`)
-                .then(data => {
-                    if (data.success && data.data) {
-                        // 将BTC价格数据存储起来，等收益数据加载后一起处理
-                        window.btcPriceData = data.data;
-                        
-                        // 如果没有收益数据，直接显示BTC价格图表
-                        if (dailyPnlChart.data.datasets[0].data.length <= 1) {
-                            displayOnlyBtcChart(data.data);
-                        }
-                    } else {
-                        console.error('获取BTC价格数据失败:', data.message);
-                    }
-                    
-                    // 获取历史仓位数据用于收益曲线
-                    fetchWithAuth(`${API_BASE_PATH}/position_history`)
-                        .then(posData => {
-                            if (posData.success && posData.data) {
-                                // 使用历史仓位数据生成收益曲线
-                                generateDailyPnlChartData(posData.data);
-                            } else {
-                                console.error('获取历史仓位数据失败:', posData.message);
-                            }
-                        })
-                        .catch(error => {
-                            console.error('API请求异常:', error);
-                        });
-                })
-                .catch(error => {
-                    console.error('获取BTC价格API请求异常:', error);
-                    
-                    // 即使BTC价格获取失败，也要尝试获取仓位数据
-                    fetchWithAuth(`${API_BASE_PATH}/position_history`)
-                        .then(posData => {
-                            if (posData.success && posData.data) {
-                                generateDailyPnlChartData(posData.data);
-                            } else {
-                                console.error('获取历史仓位数据失败:', posData.message);
-                            }
-                        })
-                        .catch(error => {
-                            console.error('API请求异常:', error);
-                        });
-                });
+        // 计算今日总盈亏和胜率
+        function calculateTodayStats(positions) {
+            // 获取今日开始时间（0点）
+            const today = new Date();
+            today.setHours(0, 0, 0, 0);
+            const todayTimestamp = today.getTime();
+            const tomorrowTimestamp = todayTimestamp + 86400000; // 加一天的毫秒数
+            
+            // 筛选今日平仓的仓位
+            const todayPositions = positions.filter(position => {
+                // 确保有平仓时间且是今天的记录
+                return position.exit_timestamp && 
+                       position.exit_timestamp >= todayTimestamp && 
+                       position.exit_timestamp < tomorrowTimestamp;
+            });
+            
+            // 计算今日总盈亏
+            let totalPnl = 0;
+            let winCount = 0;
+            
+            todayPositions.forEach(position => {
+                const pnlAmount = parseFloat(position.pnl_amount || 0);
+                totalPnl += pnlAmount;
+                
+                // 计算胜率
+                if (pnlAmount > 0) {
+                    winCount++;
+                }
+            });
+            
+            // 计算胜率
+            const winRate = todayPositions.length > 0 ? (winCount / todayPositions.length * 100) : 0;
+            
+            // 更新页面显示
+            document.getElementById('todayPnl').textContent = `${totalPnl.toFixed(2)} USDT`;
+            document.getElementById('winRate').textContent = `${winRate.toFixed(2)}%`;
+            
+            console.log(`今日数据: 总盈亏=${totalPnl.toFixed(2)} USDT, 胜率=${winRate.toFixed(2)}%, 总成交=${todayPositions.length}笔, 盈利=${winCount}笔`);
         }
         
         // 显示只有BTC价格的图表
@@ -1006,6 +1083,881 @@
             
             dailyPnlChart.update();
         }
+
+        // 格式化日期时间
+        function formatDateTime(timestamp) {
+            if (!timestamp) return '未知';
+            
+            // 转换时间戳为数字，如果是字符串的话
+            timestamp = Number(timestamp);
+            
+            // 检查时间戳长度，小于13位可能是秒，大于等于13位可能是毫秒
+            if (timestamp < 10000000000) { // 秒级时间戳 (小于2286年)
+                timestamp *= 1000; // 转为毫秒
+            }
+            
+            try {
+                const date = new Date(timestamp);
+                if (isNaN(date.getTime())) {
+                    return '无效日期';
+                }
+                
+                return date.toLocaleString('zh-CN', {
+                    year: 'numeric',
+                    month: '2-digit',
+                    day: '2-digit',
+                    hour: '2-digit',
+                    minute: '2-digit',
+                    second: '2-digit',
+                    hour12: false
+                });
+            } catch (e) {
+                console.error('格式化日期时间失败:', e, timestamp);
+                return '格式错误';
+            }
+        }
+
+        // 格式化价格，保留小数点
+        function formatPrice(price) {
+            if (!price) return '0.00';
+            return parseFloat(price).toFixed(2);
+        }
+
+        // 格式化盈亏，带颜色
+        function formatPnL(pnl) {
+            if (!pnl) return '<span>0.00</span>';
+            const value = parseFloat(pnl);
+            if (value > 0) {
+                return `<span class="text-success">+${value.toFixed(2)}</span>`;
+            } else if (value < 0) {
+                return `<span class="text-danger">${value.toFixed(2)}</span>`;
+            } else {
+                return `<span>0.00</span>`;
+            }
+        }
+
+        // 同步持仓数据
+        async function syncPositions() {
+            if (isSyncing) {
+                console.log('已有同步任务在进行中...');
+                return;
+            }
+            
+            isSyncing = true;
+            startLoading();
+            
+            try {
+                // 显示同步中状态
+                document.getElementById('lastSyncTime').textContent = '同步中...';
+                
+                // 调用API同步持仓
+                const response = await fetch('/api/close_all', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        action: 'sync_only'
+                    })
+                });
+                
+                const data = await response.json();
+                
+                if (data.status === 'success') {
+                    // 同步成功，记录同步时间
+                    const now = new Date();
+                    document.getElementById('lastSyncTime').textContent = `上次同步: ${now.toLocaleTimeString()}`;
+                    console.log('持仓同步成功');
+                    
+                    // 同步成功后加载最新数据
+                    await loadPositions();
+                } else {
+                    document.getElementById('lastSyncTime').textContent = '同步失败';
+                    console.error('持仓同步失败:', data.message || '未知错误');
+                    
+                    // 尝试加载现有数据
+                    await loadPositions();
+                }
+            } catch (error) {
+                document.getElementById('lastSyncTime').textContent = '同步异常';
+                console.error('持仓同步异常:', error);
+                
+                // 尝试加载现有数据
+                await loadPositions();
+            } finally {
+                isSyncing = false;
+                stopLoading();
+            }
+        }
+
+        // 加载持仓数据
+        async function loadPositions() {
+            clearLoadingState();
+                startLoading();
+                
+            console.log('开始加载持仓数据...');
+            
+            try {
+                // 使用/api/status获取数据，该API返回包含止盈止损信息的完整持仓数据
+                const response = await fetch('/api/status');
+                const data = await response.json();
+                
+                if (data.success) {
+                    // 支持多种可能的数据格式
+                    let positions = [];
+                    
+                    if (data.data) {
+                        if (data.data.positions && data.data.positions.positions) {
+                            positions = data.data.positions.positions;
+                            console.log('从status API中提取持仓数据，数量:', positions.length);
+                        } else if (Array.isArray(data.data)) {
+                            positions = data.data;
+                        } else if (typeof data.data === 'object') {
+                            // 尝试将对象格式转换为数组格式
+                            const posArray = [];
+                            for (const key in data.data) {
+                                if (typeof data.data[key] === 'object') {
+                                    posArray.push({...data.data[key], symbol: key}); // 使用key作为symbol
+                                }
+                            }
+                            positions = posArray;
+                        }
+                    }
+                    
+                    console.log('解析出的持仓数据:', positions);
+                    
+                    // 确保是数组
+                    if (!Array.isArray(positions)) {
+                        positions = [];
+                    }
+                    
+                    // 调试每个持仓的关键字段
+                    if (positions.length > 0) {
+                        positions.forEach((pos, index) => {
+                            console.log(`持仓 ${index+1}: ${pos.symbol}`, {
+                                margin: pos.margin,
+                                take_profit_pct: pos.take_profit_pct,
+                                stop_loss_pct: pos.stop_loss_pct,
+                                take_profit_price: pos.take_profit_price,
+                                stop_loss_price: pos.stop_loss_price,
+                                ladder_tp: pos.ladder_tp,
+                                ladder_closed_pct: pos.ladder_closed_pct
+                            });
+                        });
+                    }
+                    
+                    // 确保每个持仓项有last_sync_time字段，如果没有则设置为当前时间
+                    const now = Date.now(); // 当前时间戳（毫秒）
+                    positions.forEach(pos => {
+                        if (!pos.last_sync_time) {
+                            console.log(`持仓 ${pos.symbol} 没有last_sync_time，设置为当前时间`);
+                            pos.last_sync_time = now;
+                        }
+                    });
+                    
+                    // 先更新统计数据
+                    updateSummary(positions);
+                    
+                    // 如果没有持仓，直接显示无持仓信息
+                    if (positions.length === 0) {
+                        $('#positionsTable tbody').html(`
+                            <tr>
+                                <td colspan="11" class="text-center">
+                                    没有持仓数据
+                                </td>
+                            </tr>
+                        `);
+                        
+                        document.getElementById('positionsContainer').innerHTML = 
+                            '<div class="col-12 text-center py-5"><p>当前没有持仓</p></div>';
+                    } else {
+                        // 有持仓数据，更新表格和卡片
+                        updatePositionsTable(positions);
+                        renderOpenPositions(positions);
+                    }
+                } else {
+                    console.error('加载持仓失败:', data.message || '未知错误');
+                    $('#positionsTable tbody').html(`
+                        <tr>
+                            <td colspan="11" class="text-center text-danger">
+                                加载失败: ${data.message || '未知错误'}
+                            </td>
+                        </tr>
+                    `);
+                    
+                    // 同时更新卡片视图
+                    document.getElementById('positionsContainer').innerHTML = 
+                        '<div class="col-12 text-center py-5"><p class="text-danger">加载失败: ' + 
+                        (data.message || '未知错误') + '</p></div>';
+                }
+            } catch (error) {
+                console.error('加载持仓异常:', error);
+                $('#positionsTable tbody').html(`
+                    <tr>
+                        <td colspan="11" class="text-center text-danger">
+                            加载异常: ${error.message || '未知错误'}
+                        </td>
+                    </tr>
+                `);
+                
+                // 同时更新卡片视图
+                document.getElementById('positionsContainer').innerHTML = 
+                    '<div class="col-12 text-center py-5"><p class="text-danger">加载异常: ' + 
+                    (error.message || '未知错误') + '</p></div>';
+            } finally {
+                stopLoading();
+            }
+        }
+
+        // 清除所有加载状态
+        function clearLoadingState() {
+            // 清除表格中的加载状态
+            const loadingRows = document.querySelectorAll('#positionsTable tbody tr td:nth-child(1)');
+            loadingRows.forEach(td => {
+                if (td.textContent.includes('载入中...')) {
+                    td.closest('tr').remove();
+                }
+            });
+            
+            // 清除卡片视图中的加载状态
+            const container = document.getElementById('positionsContainer');
+            if (container.textContent.includes('正在加载持仓数据...')) {
+                container.innerHTML = '';
+            }
+            
+            // 清除统计卡片中的加载状态
+            const totalPositions = document.getElementById('totalPositions');
+            if (totalPositions.textContent === '加载中...') {
+                totalPositions.textContent = '0';
+            }
+            
+            const totalPnl = document.getElementById('totalPnl');
+            if (totalPnl.textContent === '加载中...') {
+                totalPnl.textContent = '0.00';
+            }
+            
+            const todayPnl = document.getElementById('todayPnl');
+            if (todayPnl.textContent === '加载中...') {
+                todayPnl.textContent = '0.00';
+            }
+            
+            const winRate = document.getElementById('winRate');
+            if (winRate.textContent === '加载中...') {
+                winRate.textContent = '0%';
+            }
+        }
+
+        // 更新持仓表格
+        function updatePositionsTable(positions) {
+            let tableHtml = '';
+            if (!positions || !Array.isArray(positions) || positions.length === 0) {
+                $('#positionsTable tbody').html(`
+                    <tr>
+                        <td colspan="11" class="text-center">
+                            当前没有持仓
+                        </td>
+                    </tr>
+                `);
+                return;
+            }
+            
+            console.log(`更新持仓表格，数据: ${positions.length}条记录`);
+            
+            positions.forEach(pos => {
+                if (!pos || !pos.symbol) {
+                    console.error("持仓数据格式不正确:", pos);
+                    return;
+                }
+                
+                console.log(`处理持仓: ${pos.symbol}`);
+                console.log(`持仓详情: 方向=${pos.direction}, 杠杆=${pos.leverage}, 入场价=${pos.entry_price}`);
+                console.log(`盈亏信息: 浮动盈亏=${pos.unrealized_pnl}, 已实现盈亏=${pos.realized_pnl}`);
+                
+                const direction = pos.direction || (pos.quantity > 0 ? 'long' : 'short');
+                const directionClass = direction === 'long' ? 'text-success' : 'text-danger';
+                const directionText = direction === 'long' ? '多' : '空';
+                
+                // 优先使用后端返回的止盈价格
+                let takeProfitPrice = "未设置";
+                if (pos.take_profit_price && pos.take_profit_price > 0) {
+                    takeProfitPrice = formatPrice(pos.take_profit_price);
+                } else if (pos.entry_price && pos.take_profit_pct && pos.take_profit_pct > 0) {
+                    // 如果没有价格但有百分比，则自行计算
+                    const entryPrice = parseFloat(pos.entry_price);
+                    const tpPct = parseFloat(pos.take_profit_pct);
+                    const calculatedPrice = direction === 'long' 
+                        ? entryPrice * (1 + tpPct)
+                        : entryPrice * (1 - tpPct);
+                    takeProfitPrice = formatPrice(calculatedPrice);
+                }
+                
+                // 优先使用后端返回的止损价格
+                let stopLossPrice = "未设置";
+                if (pos.stop_loss_price && pos.stop_loss_price > 0) {
+                    stopLossPrice = formatPrice(pos.stop_loss_price);
+                } else if (pos.entry_price && pos.stop_loss_pct && pos.stop_loss_pct > 0) {
+                    // 如果没有价格但有百分比，则自行计算
+                    const entryPrice = parseFloat(pos.entry_price);
+                    const slPct = parseFloat(pos.stop_loss_pct);
+                    const calculatedPrice = direction === 'long'
+                        ? entryPrice * (1 - slPct)
+                        : entryPrice * (1 + slPct);
+                    stopLossPrice = formatPrice(calculatedPrice);
+                }
+                
+                // 处理保证金显示
+                let marginValue = pos.margin || 0;
+                if (marginValue <= 0 && pos.entry_price && pos.quantity && pos.leverage) {
+                    // 如果保证金为0，尝试计算
+                    const contractValue = Math.abs(parseFloat(pos.quantity)) * parseFloat(pos.entry_price);
+                    marginValue = contractValue / parseFloat(pos.leverage);
+                }
+                
+                // 确保已实现盈亏有正确的值，不显示保证金
+                let realizedPnl = pos.realized_pnl || 0;
+                // 确保realizedPnl是数值类型
+                if (typeof realizedPnl === 'string') {
+                    realizedPnl = parseFloat(realizedPnl);
+                }
+                console.log(`${pos.symbol} 已实现盈亏: ${realizedPnl} (类型: ${typeof realizedPnl})`);
+                
+                // 阶梯止盈进度
+                let ladderProgress = '';
+                if (pos.ladder_tp && pos.ladder_closed_pct > 0) {
+                    const closedPct = parseFloat(pos.ladder_closed_pct) * 100;
+                    ladderProgress = `
+                    <div class="progress ladder-progress">
+                        <div class="progress-bar bg-success" role="progressbar" 
+                            style="width: ${closedPct}%" 
+                            aria-valuenow="${closedPct}" 
+                            aria-valuemin="0" 
+                            aria-valuemax="100">
+                            ${closedPct.toFixed(0)}%
+                        </div>
+                    </div>`;
+                } else {
+                    ladderProgress = "未启用";
+                }
+                
+                tableHtml += `
+                    <tr>
+                        <td>${pos.symbol}</td>
+                        <td class="${directionClass}">${directionText}</td>
+                        <td>${formatPrice(marginValue)}</td>
+                        <td>${pos.leverage || 1}x</td>
+                        <td>${formatPrice(pos.entry_price)}</td>
+                        <td>${formatPrice(pos.last_price || pos.current_price)}</td>
+                        <td class="text-success">${takeProfitPrice}</td>
+                        <td class="text-danger">${stopLossPrice}</td>
+                        <td>${formatPnL(pos.unrealized_pnl)}</td>
+                        <td>${formatPnL(realizedPnl)}</td>
+                        <td>${ladderProgress}</td>
+                    </tr>
+                `;
+            });
+            
+            if (tableHtml === '') {
+                $('#positionsTable tbody').html(`
+                    <tr>
+                        <td colspan="11" class="text-center">
+                            持仓数据解析错误，请检查控制台日志
+                        </td>
+                    </tr>
+                `);
+            } else {
+                $('#positionsTable tbody').html(tableHtml);
+            }
+        }
+
+        // 开始加载动画
+        function startLoading() {
+            // 显示加载指示器或禁用相关按钮
+            document.getElementById('refreshBtn').disabled = true;
+            document.getElementById('refreshBtn').innerHTML = '<i class="fas fa-spinner fa-spin"></i> 加载中...';
+        }
+        
+        // 停止加载动画
+        function stopLoading() {
+            // 启用刷新按钮
+            if (document.getElementById('refreshBtn')) {
+                document.getElementById('refreshBtn').disabled = false;
+                document.getElementById('refreshBtn').innerHTML = '<i class="fas fa-sync"></i> 刷新';
+            }
+            
+            // 确保顶部卡片不再显示"加载中..."
+            if (document.getElementById('totalPositions').textContent === '加载中...') {
+                document.getElementById('totalPositions').textContent = '0';
+            }
+            if (document.getElementById('totalPnl').textContent === '加载中...') {
+                document.getElementById('totalPnl').textContent = '0.00 USDT (0.00%)';
+            }
+            if (document.getElementById('todayPnl').textContent === '加载中...') {
+                document.getElementById('todayPnl').textContent = '0.00 USDT';
+            }
+            if (document.getElementById('winRate').textContent === '加载中...') {
+                document.getElementById('winRate').textContent = '0.00%';
+            }
+        }
+
+        // 渲染持仓卡片视图
+        function renderOpenPositions(positions) {
+            const container = document.getElementById('positionsContainer');
+            
+            if (!positions || !Array.isArray(positions) || positions.length === 0) {
+                container.innerHTML = '<div class="col-12 text-center py-5"><p>当前没有持仓</p></div>';
+                return;
+            }
+            
+            let cardsHtml = '';
+            
+            positions.forEach(pos => {
+                if (!pos || !pos.symbol) {
+                    return;
+                }
+                
+                console.log(`渲染持仓卡片: ${pos.symbol}, 已实现盈亏=${pos.realized_pnl}`);
+                
+                const direction = pos.direction || (pos.quantity > 0 ? 'long' : 'short');
+                const directionClass = direction === 'long' ? 'text-success' : 'text-danger';
+                const directionText = direction === 'long' ? '多' : '空';
+                
+                // 计算盈亏百分比
+                let pnlPct = 0;
+                if (pos.unrealized_pnl && pos.entry_price && pos.quantity) {
+                    const value = Math.abs(parseFloat(pos.entry_price) * parseFloat(pos.quantity));
+                    if (value > 0) {
+                        pnlPct = (parseFloat(pos.unrealized_pnl) / value) * 100;
+                    }
+                }
+                
+                // 盈亏样式
+                const pnlClass = parseFloat(pos.unrealized_pnl) >= 0 ? 'profit' : 'loss';
+                
+                // 卡片背景颜色 - 盈利为绿色轻背景，亏损为红色轻背景
+                const cardBg = parseFloat(pos.unrealized_pnl) >= 0 ? 'bg-light-success' : 'bg-light-danger';
+                
+                // 计算止盈止损价格
+                let takeProfitPrice = "未设置";
+                let stopLossPrice = "未设置";
+
+                
+                // 优先使用后端返回的止盈止损价格
+                if (pos.take_profit_price && pos.take_profit_price > 0) {
+                    takeProfitPrice = formatPrice(pos.take_profit_price);
+                } else if (pos.entry_price && pos.take_profit_pct && pos.take_profit_pct > 0) {
+                    // 如果没有价格但有百分比，则自行计算
+                    const entryPrice = parseFloat(pos.entry_price);
+                    const tpPct = parseFloat(pos.take_profit_pct);
+                    const calculatedPrice = direction === 'long' 
+                        ? entryPrice * (1 + tpPct)
+                        : entryPrice * (1 - tpPct);
+                    takeProfitPrice = formatPrice(calculatedPrice);
+                    console.log(`- 使用计算的止盈价格: ${takeProfitPrice} (比例: ${tpPct})`);
+                }
+                
+                // 优先使用后端返回的止损价格
+                if (pos.stop_loss_price && pos.stop_loss_price > 0) {
+                    stopLossPrice = formatPrice(pos.stop_loss_price);
+                } else if (pos.entry_price && pos.stop_loss_pct && pos.stop_loss_pct > 0) {
+                    // 如果没有价格但有百分比，则自行计算
+                    const entryPrice = parseFloat(pos.entry_price);
+                    const slPct = parseFloat(pos.stop_loss_pct);
+                    const calculatedPrice = direction === 'long'
+                        ? entryPrice * (1 - slPct)
+                        : entryPrice * (1 + slPct);
+                    stopLossPrice = formatPrice(calculatedPrice);
+                }
+                
+                // 处理保证金显示
+                let marginValue = pos.margin || 0;
+                if (marginValue <= 0 && pos.entry_price && pos.quantity && pos.leverage) {
+                    // 如果保证金为0，尝试计算
+                    const contractValue = Math.abs(parseFloat(pos.quantity)) * parseFloat(pos.entry_price);
+                    marginValue = contractValue / parseFloat(pos.leverage);
+                }
+                
+                // 确保已实现盈亏有正确的值，不显示保证金
+                let realizedPnl = pos.realized_pnl || 0;
+                // 确保realizedPnl是数值类型
+                if (typeof realizedPnl === 'string') {
+                    realizedPnl = parseFloat(realizedPnl);
+                }
+                console.log(`${pos.symbol} 卡片已实现盈亏: ${realizedPnl} (类型: ${typeof realizedPnl})`);
+                
+                // 阶梯止盈进度条
+                let ladderTpHtml = '';
+                if (pos.ladder_tp && pos.ladder_closed_pct > 0) {
+                    const closedPct = parseFloat(pos.ladder_closed_pct) * 100;
+                    ladderTpHtml = `
+                    <div class="mt-2">
+                        <p class="card-text mb-1"><small>阶梯止盈进度</small></p>
+                        <div class="progress ladder-progress">
+                            <div class="progress-bar bg-success" role="progressbar" 
+                                style="width: ${closedPct}%" 
+                                aria-valuenow="${closedPct}" 
+                                aria-valuemin="0" 
+                                aria-valuemax="100">
+                                ${closedPct.toFixed(0)}%
+                            </div>
+                        </div>
+                    </div>`;
+                }
+                
+                // 动态止盈
+                let trailingStopHtml = '';
+                if (pos.trailing_stop && pos.trailing_distance) {
+                    const currentPrice = parseFloat(pos.last_price || pos.current_price);
+                    const trailingDistance = parseFloat(pos.trailing_distance);
+                    let activationPrice = "未激活";
+                    let triggerPrice = "未激活";
+                    
+                    // 如果已经激活了动态止盈
+                    if (pos.trailing_active) {
+                        activationPrice = formatPrice(pos.trailing_activation_price || 0);
+                        triggerPrice = direction === 'long'
+                            ? formatPrice((currentPrice || 0) * (1 - trailingDistance))
+                            : formatPrice((currentPrice || 0) * (1 + trailingDistance));
+                    }
+                    
+                    trailingStopHtml = `
+                    <div class="mt-2">
+                        <p class="card-text mb-1"><small>动态止盈</small></p>
+                        <p class="card-text small">激活价: ${activationPrice} / 触发价: ${triggerPrice}</p>
+                    </div>`;
+                }
+                
+                // 构建卡片HTML (更新已实现盈亏部分)
+                const cardHtml = `
+                <div class="col-lg-4 col-md-6 mb-4">
+                    <div class="card position-card h-100 shadow-sm">
+                        <div class="card-header bg-${direction === 'long' ? 'success' : 'danger'} text-white d-flex justify-content-between align-items-center">
+                            <h5 class="mb-0">${pos.symbol} ${directionText}单</h5>
+                            <div>
+                                <button class="btn btn-sm btn-light btn-close-position" data-symbol="${pos.symbol}">平仓</button>
+                            </div>
+                        </div>
+                        <div class="card-body">
+                            <div class="row">
+                                <div class="col-6">
+                                    <p class="card-text"><small>入场价</small><br><span class="fs-5">${formatPrice(pos.entry_price)}</span></p>
+                                </div>
+                                <div class="col-6">
+                                    <p class="card-text"><small>当前价</small><br><span class="fs-5">${formatPrice(pos.current_price)}</span></p>
+                                </div>
+                            </div>
+                            <div class="row mt-3">
+                                <div class="col-6">
+                                    <p class="card-text"><small>保证金</small><br><span class="fs-5">${formatPrice(marginValue)}</span></p>
+                                </div>
+                                <div class="col-6">
+                                    <p class="card-text"><small>杠杆</small><br><span class="fs-5">${pos.leverage || 1}x</span></p>
+                                </div>
+                            </div>
+                            <div class="row mt-3">
+                                <div class="col-6">
+                                    <p class="card-text"><small>止盈价</small><br><span class="fs-5 text-success">${takeProfitPrice}</span></p>
+                                </div>
+                                <div class="col-6">
+                                    <p class="card-text"><small>止损价</small><br><span class="fs-5 text-danger">${stopLossPrice}</span></p>
+                            </div>
+                            </div>
+                            <div class="row mt-3">
+                                <div class="col-6">
+                                    <p class="card-text"><small>未实现盈亏</small><br><span class="fs-5 ${pnlClass}">${formatPnL(pos.unrealized_pnl)}</span></p>
+                                </div>
+                                <div class="col-6">
+                                    <p class="card-text"><small>已实现盈亏</small><br><span class="fs-5 ${parseFloat(realizedPnl) >= 0 ? 'profit' : 'loss'}">${formatPnL(realizedPnl)}</span></p>
+                                </div>
+                            </div>
+                            ${ladderTpHtml}
+                            ${trailingStopHtml}
+                        </div>
+                    </div>
+                </div>
+                `;
+                
+                cardsHtml += cardHtml;
+            });
+            
+                container.innerHTML = cardsHtml;
+        }
+        
+        // 添加检查API数据按钮的功能
+        function addCheckApiDataButton() {
+            // 创建按钮
+            const buttonHtml = `
+                <button id="checkApiData" class="btn btn-info me-2">
+                    <i class="fas fa-bug"></i> 检查API数据
+                </button>
+            `;
+            
+            // 插入到刷新按钮旁边
+            const refreshBtn = document.getElementById('refreshBtn');
+            if (refreshBtn) {
+                refreshBtn.insertAdjacentHTML('beforebegin', buttonHtml);
+                
+                // 添加点击事件
+                document.getElementById('checkApiData').addEventListener('click', function() {
+                    fetchAndShowApiData();
+                });
+            }
+        }
+        
+        // 获取并显示API数据
+        function fetchAndShowApiData() {
+            startLoading();
+            
+            fetch(`${API_BASE_PATH}/status`)
+                .then(response => response.json())
+                .then(data => {
+                    console.log("API完整响应数据:", data);
+                    
+                    if (data && data.positions && data.positions.positions) {
+                        const positions = data.positions.positions;
+                        console.log("API返回的持仓数据:", positions);
+                        
+                        // 详细调试信息
+                        positions.forEach(pos => {
+                            console.log(`持仓 ${pos.symbol} 的详细信息:`);
+                            console.log(` - 方向: ${pos.direction}`);
+                            console.log(` - 入场价: ${pos.entry_price}`);
+                            console.log(` - 当前价: ${pos.current_price}`);
+                            console.log(` - 保证金: ${pos.margin}`);
+                            console.log(` - 杠杆: ${pos.leverage}`);
+                            console.log(` - 止盈比例: ${pos.signal?.take_profit_pct}`);
+                            console.log(` - 止损比例: ${pos.signal?.stop_loss_pct}`);
+                            console.log(` - 阶梯止盈: ${pos.ladder_tp ? '启用' : '禁用'}`);
+                            console.log(` - 阶梯止盈进度: ${pos.ladder_closed_pct || 0}`);
+                            console.log(` - 未实现盈亏: ${pos.unrealized_pnl}`);
+                            console.log(` - 已实现盈亏: ${pos.realized_pnl}`);
+                            
+                            // 计算预期的止盈止损价格
+                            const entryPrice = parseFloat(pos.entry_price);
+                            const direction = pos.direction;
+                            const tpPct = parseFloat(pos.signal?.take_profit_pct || 0);
+                            const slPct = parseFloat(pos.signal?.stop_loss_pct || 0);
+                            
+                            let expectedTp = 0, expectedSl = 0;
+                            if (direction === 'long') {
+                                expectedTp = entryPrice * (1 + tpPct / pos.leverage);
+                                expectedSl = entryPrice * (1 - slPct / pos.leverage);
+                            } else {
+                                expectedTp = entryPrice * (1 - tpPct / pos.leverage);
+                                expectedSl = entryPrice * (1 + slPct / pos.leverage);
+                            }
+                            
+                            console.log(` - 预期止盈价: ${expectedTp.toFixed(4)} (后端: ${pos.take_profit_price})`);
+                            console.log(` - 预期止损价: ${expectedSl.toFixed(4)} (后端: ${pos.stop_loss_price})`);
+                        });
+                        
+                        // 创建JSON显示弹窗
+                        showJsonDataModal(positions);
+                    } else {
+                        console.log("API响应中无持仓数据");
+                        showJsonDataModal([]);
+                    }
+                    
+                    stopLoading();
+                })
+                .catch(error => {
+                    console.error("获取API数据失败:", error);
+                    stopLoading();
+                });
+        }
+        
+        // 显示JSON数据弹窗
+        function showJsonDataModal(jsonData) {
+            // 创建模态框HTML
+            const modalHtml = `
+            <div class="modal fade" id="jsonDataModal" tabindex="-1" aria-labelledby="jsonDataModalLabel" aria-hidden="true">
+                <div class="modal-dialog modal-lg">
+                    <div class="modal-content">
+                        <div class="modal-header">
+                            <h5 class="modal-title" id="jsonDataModalLabel">API数据详情</h5>
+                            <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                        </div>
+                        <div class="modal-body">
+                            <pre id="jsonContent" style="max-height: 500px; overflow-y: auto;">${JSON.stringify(jsonData, null, 2)}</pre>
+                        </div>
+                        <div class="modal-footer">
+                            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">关闭</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            `;
+            
+            // 添加到DOM
+            document.body.insertAdjacentHTML('beforeend', modalHtml);
+            
+            // 显示模态框
+            const jsonModal = new bootstrap.Modal(document.getElementById('jsonDataModal'));
+            jsonModal.show();
+            
+            // 设置自动删除
+            document.getElementById('jsonDataModal').addEventListener('hidden.bs.modal', function () {
+                this.remove();
+            });
+        }
+        
+        // 初始化页面
+        $(document).ready(function() {
+            // ... [existing code]
+            
+            // 添加检查API数据按钮
+            addCheckApiDataButton();
+        });
+
+        // 显示消息提示
+        function showToast(title, message, type = 'info') {
+            // 创建或获取toast容器
+            let toastContainer = document.getElementById('toast-container');
+            if (!toastContainer) {
+                toastContainer = document.createElement('div');
+                toastContainer.id = 'toast-container';
+                toastContainer.className = 'position-fixed top-0 end-0 p-3';
+                toastContainer.style.zIndex = '5000';
+                document.body.appendChild(toastContainer);
+            }
+            
+            // 生成唯一ID
+            const toastId = 'toast-' + new Date().getTime();
+            
+            // 设置Bootstrap颜色类型
+            const bgClass = type === 'success' ? 'bg-success' : 
+                           type === 'danger' ? 'bg-danger' : 
+                           type === 'warning' ? 'bg-warning' : 'bg-info';
+            
+            // 创建toast HTML
+            const toastHtml = `
+                <div id="${toastId}" class="toast" role="alert" aria-live="assertive" aria-atomic="true">
+                    <div class="toast-header ${bgClass} text-white">
+                        <strong class="me-auto">${title}</strong>
+                        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="toast" aria-label="Close"></button>
+                    </div>
+                    <div class="toast-body">
+                        ${message}
+                    </div>
+                </div>
+            `;
+            
+            // 添加到容器
+            toastContainer.insertAdjacentHTML('beforeend', toastHtml);
+            
+            // 获取并显示Toast
+            const toastElement = document.getElementById(toastId);
+            const toast = new bootstrap.Toast(toastElement, {
+                autohide: true,
+                delay: 5000
+            });
+            toast.show();
+            
+            // 自动删除
+            toastElement.addEventListener('hidden.bs.toast', function () {
+                this.remove();
+            });
+        }
+    </script>
+    
+    <!-- 调试工具按钮 -->
+    <div style="position: fixed; bottom: 20px; left: 20px; z-index: 9999;">
+        <button id="debugApiBtn" class="btn btn-warning btn-sm">检查API数据</button>
+    </div>
+    
+    <script>
+        // 调试按钮事件
+        document.getElementById('debugApiBtn').addEventListener('click', async function() {
+            try {
+                // 获取当前持仓数据
+                const response = await fetch('/api/status');
+                const data = await response.json();
+                
+                console.log('===== 完整API响应数据 =====');
+                console.log(data);
+                
+                if (data.success && data.data && data.data.positions) {
+                    const positions = data.data.positions.positions || [];
+                    
+                    console.log('===== 持仓数据调试信息 =====');
+                    console.log('数据类型:', typeof positions);
+                    console.log('是否数组:', Array.isArray(positions));
+                    console.log('持仓数量:', positions.length);
+                    
+                    // 检查每个持仓的止盈止损数据
+                    positions.forEach((pos, index) => {
+                        console.log(`\n持仓 ${index+1}: ${pos.symbol}`);
+                        console.log('原始持仓数据:', pos);
+                        console.log('保证金:', pos.margin);
+                        console.log('方向:', pos.direction);
+                        console.log('入场价:', pos.entry_price);
+                        console.log('止盈比例:', pos.take_profit_pct);
+                        console.log('止损比例:', pos.stop_loss_pct);
+                        console.log('止盈价格:', pos.take_profit_price);
+                        console.log('止损价格:', pos.stop_loss_price);
+                        
+                        // 计算并显示预期的止盈止损价格
+                        if(pos.entry_price && pos.direction) {
+                            const entryPrice = parseFloat(pos.entry_price);
+                            
+                            if(pos.take_profit_pct) {
+                                const tpPct = parseFloat(pos.take_profit_pct);
+                                const expected_tp = pos.direction === 'long' 
+                                    ? entryPrice * (1 + tpPct) 
+                                    : entryPrice * (1 - tpPct);
+                                console.log(`预期止盈价格: ${expected_tp.toFixed(4)} (使用比例 ${tpPct})`);
+                            }
+                            
+                            if(pos.stop_loss_pct) {
+                                const slPct = parseFloat(pos.stop_loss_pct);
+                                const expected_sl = pos.direction === 'long' 
+                                    ? entryPrice * (1 - slPct) 
+                                    : entryPrice * (1 + slPct);
+                                console.log(`预期止损价格: ${expected_sl.toFixed(4)} (使用比例 ${slPct})`);
+                            }
+                        }
+                    });
+                    
+                    // 创建一个预格式化的JSON显示区域
+                const debugInfo = document.createElement('div');
+                debugInfo.style.position = 'fixed';
+                debugInfo.style.top = '50%';
+                debugInfo.style.left = '50%';
+                debugInfo.style.transform = 'translate(-50%, -50%)';
+                debugInfo.style.backgroundColor = 'white';
+                debugInfo.style.padding = '20px';
+                debugInfo.style.boxShadow = '0 0 10px rgba(0,0,0,0.5)';
+                debugInfo.style.zIndex = '10000';
+                debugInfo.style.maxWidth = '80%';
+                debugInfo.style.maxHeight = '80%';
+                debugInfo.style.overflow = 'auto';
+                
+                const closeBtn = document.createElement('button');
+                closeBtn.innerText = '关闭';
+                closeBtn.className = 'btn btn-sm btn-danger';
+                closeBtn.style.position = 'absolute';
+                closeBtn.style.top = '10px';
+                closeBtn.style.right = '10px';
+                closeBtn.onclick = function() {
+                    document.body.removeChild(debugInfo);
+                };
+                
+                const pre = document.createElement('pre');
+                    pre.textContent = JSON.stringify(positions, null, 2);
+                
+                debugInfo.appendChild(closeBtn);
+                debugInfo.appendChild(pre);
+                document.body.appendChild(debugInfo);
+                    
+                    alert('检查完成，请查看控制台日志和弹出的JSON数据');
+                } else {
+                    console.error('获取持仓数据失败:', data.message || '未知错误');
+                    alert('获取持仓数据失败: ' + (data.message || '未知错误'));
+                }
+            } catch (error) {
+                console.error('API调试异常:', error);
+                alert('API调试异常: ' + error.message);
+            }
+        });
     </script>
 </body>
 </html> 

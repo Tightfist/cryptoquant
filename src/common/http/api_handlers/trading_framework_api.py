@@ -97,14 +97,32 @@ class TradingFrameworkApiHandler:
             web.Response: HTTP响应
         """
         try:
-            # 关闭所有持仓
-            success, message = await self.framework.manual_close_all()
+            # 解析请求数据
+            data = await request.json()
+            action = data.get("action", "close")
             
-            # 返回结果
-            return web.json_response({
-                "success": success,
-                "message": message
-            })
+            if action == "sync_only":
+                # 仅同步持仓
+                if hasattr(self.framework, "position_mgr") and hasattr(self.framework.position_mgr, "sync_positions_from_api"):
+                    await self.framework.position_mgr.sync_positions_from_api()
+                    return web.json_response({
+                        "status": "success",
+                        "message": "持仓同步成功"
+                    })
+                else:
+                    return web.json_response({
+                        "status": "error",
+                        "message": "系统不支持持仓同步功能"
+                    })
+            else:
+                # 关闭所有持仓
+                success, message = await self.framework.manual_close_all()
+                
+                # 返回结果
+                return web.json_response({
+                    "success": success,
+                    "message": message
+                })
         except Exception as e:
             self.logger.exception(f"处理关闭所有持仓API异常: {e}")
             return web.json_response(
@@ -292,10 +310,15 @@ class TradingFrameworkApiHandler:
             web.Response: HTTP响应
         """
         try:
+            # 获取请求信息
+            request_id = id(request)
+            
+            # 获取今天的日期范围
+            from datetime import datetime
+            today = datetime.now().strftime("%Y-%m-%d")
+            
             # 获取查询参数
             params = request.query
-            start_date = params.get('start_date')
-            end_date = params.get('end_date')
             symbol = params.get('symbol')
             limit_str = params.get('limit', '100')
             
@@ -305,185 +328,199 @@ class TradingFrameworkApiHandler:
             except ValueError:
                 limit = 100
             
-            # 添加调试日志
-            self.logger.info(f"处理仓位历史查询API请求: start_date={start_date}, end_date={end_date}, symbol={symbol}, limit={limit}")
+            # 记录查询参数
+            self.logger.info(f"[请求ID:{request_id}] 历史仓位查询: date={today}, symbol={symbol}, limit={limit}")
             
-            # 获取仓位历史数据
-            try:
-                position_history = await self.framework.get_position_history(
-                    start_date, end_date, symbol, limit
-                )
-                
-                if position_history is None:
-                    position_history = []
-                    self.logger.warning("获取仓位历史返回None")
-                
-                self.logger.info(f"获取到 {len(position_history)} 条仓位历史记录")
-                
-                # 如果返回的列表为空，添加调试日志
-                if not position_history:
-                    self.logger.warning("仓位历史为空列表")
-                
-            except Exception as e:
-                self.logger.exception(f"获取仓位历史发生异常: {e}")
+            # 执行实际查询
+            position_history = await self.framework.get_position_history(
+                today, today, symbol, limit
+            )
+            
+            if position_history is None:
                 position_history = []
             
             # 返回结果
-            return web.json_response({
+            response_data = {
                 "success": True,
-                "data": position_history
-            })
+                "data": position_history,
+                "timestamp": int(datetime.now().timestamp()),
+                "count": len(position_history)
+            }
+            self.logger.info(f"[请求ID:{request_id}] 历史仓位响应: count={len(position_history)}")
+            return web.json_response(response_data)
         except Exception as e:
-            self.logger.exception(f"处理仓位历史查询API异常: {e}")
+            request_id = id(request) if hasattr(request, 'id') else 'unknown'
+            self.logger.exception(f"[请求ID:{request_id}] 处理仓位历史查询API异常: {e}")
+            from datetime import datetime
             return web.json_response(
-                {"success": False, "message": f"处理异常: {e}"},
-                status=500
+                {"success": False, "message": f"处理异常: {e}", "timestamp": int(datetime.now().timestamp()), "data": []},
+                status=200  # 即使出错也返回200状态码而不是500，让前端能正常处理
             )
     
     async def handle_api_open_positions(self, request: web.Request) -> web.Response:
         """
-        处理未平仓仓位查询API请求
+        处理查询当前持仓的API请求
         
         Args:
             request: HTTP请求对象
-            
+        
         Returns:
-            web.Response: HTTP响应
+            web.Response: JSON响应，包含当前持仓信息
         """
         try:
-            # 获取状态，其中包含未平仓仓位
-            status = await self.framework.get_status()
+            params = request.query_string if request.query_string else "无参数"
+            self.logger.info(f"当前持仓查询: 参数={params}")
             
-            # 提取未平仓仓位
-            positions_summary = status.get('positions', {})
+            # 获取持仓摘要信息
+            positions_summary = self.framework.strategy.get_position_summary()
             
-            # 修复: 确保我们正确获取positions列表
-            open_positions = positions_summary.get('positions', [])
+            # 简明打印持仓摘要
+            positions_count = len(positions_summary.get('positions', []))
             
-            result_positions = []
-            
-            # 为每个仓位添加更多信息
-            for pos in open_positions:
-                if not isinstance(pos, dict):
-                    self.logger.warning(f"无效的仓位数据类型: {type(pos)}, 值: {pos}")
-                    continue
-                
-                # 获取当前价格和计算收益
-                symbol = pos.get('symbol')
-                if not symbol:
-                    self.logger.warning(f"仓位缺少symbol: {pos}")
-                    continue
-                    
-                entry_price = pos.get('entry_price', 0)
-                leverage = pos.get('leverage', 1)
-                direction = pos.get('direction', 'long')
-                
-                try:
-                    # 获取当前价格
-                    current_price = await self.framework.strategy.data_cache.get_mark_price(symbol)
-                    
-                    if current_price and entry_price:
-                        # 计算盈亏
-                        if direction == 'long':
-                            pnl_pct = (current_price - entry_price) / entry_price
-                        else:
-                            pnl_pct = (entry_price - current_price) / entry_price
-                        
-                        # 计算杠杆收益
-                        leveraged_pnl_pct = pnl_pct * leverage
-                        
-                        # 添加到响应中
-                        pos['current_price'] = current_price
-                        pos['pnl_pct'] = pnl_pct
-                        pos['leveraged_pnl_pct'] = leveraged_pnl_pct
-                        
-                        # 从仓位对象获取阶梯止盈信息
-                        if symbol in self.framework.strategy.positions:
-                            position_obj = self.framework.strategy.positions[symbol]
-                            ladder_tp = getattr(position_obj, 'ladder_tp', False)
-                            ladder_tp_pct = getattr(position_obj, 'ladder_tp_pct', 0.2)
-                            ladder_tp_step = getattr(position_obj, 'ladder_tp_step', 0.2)
-                            ladder_closed_pct = getattr(position_obj, 'ladder_closed_pct', 0.0)
-                            
-                            # 添加调试日志
-                            self.logger.info(f"阶梯止盈信息 {symbol}: 状态={ladder_tp}, 每档比例={ladder_tp_pct}, 档位间隔={ladder_tp_step}, 已平仓={ladder_closed_pct}")
-                            
-                            pos['ladder_tp'] = ladder_tp
-                            pos['ladder_tp_pct'] = ladder_tp_pct
-                            pos['ladder_tp_step'] = ladder_tp_step
-                            pos['ladder_closed_pct'] = ladder_closed_pct
-                        
-                        # 获取止盈止损百分比
-                        take_profit_pct = self.framework.strategy.take_profit_pct
-                        stop_loss_pct = self.framework.strategy.stop_loss_pct
-                        
-                        # 如果仓位对象有信号，优先使用信号的止盈止损设置
-                        if symbol in self.framework.strategy.positions:
-                            position_obj = self.framework.strategy.positions[symbol]
-                            signal = getattr(position_obj, 'signal', None)
-                            if signal:
-                                if hasattr(signal, 'take_profit_pct') and signal.take_profit_pct is not None:
-                                    take_profit_pct = signal.take_profit_pct
-                                if hasattr(signal, 'stop_loss_pct') and signal.stop_loss_pct is not None:
-                                    stop_loss_pct = signal.stop_loss_pct
-                        
-                        # 计算止盈止损价格，注意杠杆影响
-                        # 如果不是现货，杠杆影响止盈止损百分比
-                        if pos.get('position_type', 'swap') != 'spot' and leverage > 1:
-                            adjusted_tp_pct = take_profit_pct / leverage
-                            adjusted_sl_pct = stop_loss_pct / leverage
-                        else:
-                            adjusted_tp_pct = take_profit_pct
-                            adjusted_sl_pct = stop_loss_pct
-                        
-                        pos['take_profit_pct'] = adjusted_tp_pct
-                        pos['stop_loss_pct'] = adjusted_sl_pct
-                        
-                        # 计算止盈止损价格
-                        if direction == 'long':
-                            pos['take_profit_price'] = entry_price * (1 + adjusted_tp_pct)
-                            pos['stop_loss_price'] = entry_price * (1 - adjusted_sl_pct)
-                        else:
-                            pos['take_profit_price'] = entry_price * (1 - adjusted_tp_pct)
-                            pos['stop_loss_price'] = entry_price * (1 + adjusted_sl_pct)
-                        
-                        # 添加合约面值和保证金信息，用于前端计算持仓价值
-                        try:
-                            # 获取合约面值
-                            contract_size = self.framework.strategy.data_cache.get_contract_size_sync(symbol)
-                            pos['contract_size'] = contract_size
-                            
-                            # 计算合约价值
-                            quantity = abs(float(pos.get('quantity', 0)))
-                            contract_value = quantity * entry_price * contract_size
-                            
-                            # 计算保证金
-                            margin = contract_value / leverage
-                            pos['margin'] = margin
-                            
-                            # 计算盈亏金额
-                            pnl_amount = margin * leveraged_pnl_pct
-                            pos['pnl_amount'] = pnl_amount
-                            
-                            self.logger.info(f"仓位盈亏 {symbol}: 保证金={margin:.2f}, 盈亏比例={leveraged_pnl_pct*100:.2f}%, 盈亏金额={pnl_amount:.2f} USDT")
-                        except Exception as e:
-                            self.logger.error(f"计算保证金和合约面值异常: {symbol}, {e}")
-                    
-                    result_positions.append(pos)
-                except Exception as e:
-                    self.logger.error(f"计算仓位收益异常: {symbol}, {e}")
-            
-            # 返回结果
-            return web.json_response({
-                "success": True,
-                "data": result_positions
-            })
+            response_data = {
+                "status": "success",
+                "data": positions_summary,
+                "message": f"当前持有 {positions_count} 个持仓"
+            }
+            self.logger.info(f"当前持仓响应: count={positions_count}")
+            return web.json_response(response_data)
         except Exception as e:
-            self.logger.exception(f"处理未平仓仓位查询API异常: {e}")
-            return web.json_response(
-                {"success": False, "message": f"处理异常: {e}"},
-                status=500
-            )
+            self.logger.error(f"处理当前持仓查询请求异常: {e}")
+            return web.json_response({
+                "status": "error",
+                "message": f"查询当前持仓失败: {str(e)}"
+            }, status=500)
+    
+    async def handle_api_positions(self, request: web.Request) -> web.Response:
+        """
+        处理获取详细持仓数据的API请求
+        
+        Args:
+            request: HTTP请求对象
+        
+        Returns:
+            web.Response: JSON响应，包含详细持仓数据
+        """
+        try:
+            self.logger.info(f"开始处理获取详细持仓数据请求 - 请求路径: {request.url}, 查询参数: {request.query_string}")
+            
+            # 获取查询参数
+            params = request.query
+            include_closed = params.get('include_closed', '0') == '1'
+            symbol = params.get('symbol', None)
+            
+            self.logger.info(f"持仓查询参数: include_closed={include_closed}, symbol={symbol}")
+            
+            # 检查position_mgr是否存在并可访问
+            if not hasattr(self.framework, 'position_mgr'):
+                self.logger.error("framework对象缺少position_mgr属性!")
+                return web.json_response({
+                    "status": "error",
+                    "message": "系统配置错误: 持仓管理器未初始化"
+                }, status=500)
+            
+            # 从框架中获取详细持仓数据
+            if hasattr(self.framework.position_mgr, 'load_positions'):
+                self.logger.info("开始调用position_mgr.load_positions获取持仓数据...")
+                positions = self.framework.position_mgr.load_positions(
+                    include_closed=include_closed,
+                    symbol=symbol,
+                    dict_format=False
+                )
+                
+                self.logger.info(f"从数据库加载到 {len(positions) if positions else 0} 条持仓记录")
+                
+                # 将Position对象转换为可序列化的字典
+                positions_data = []
+                for pos in positions:
+                    pos_dict = {k: v for k, v in vars(pos).items() if k != 'signal'}
+                    # 添加其他需要的计算字段
+                    if not pos.closed and hasattr(self.framework.trader, 'get_mark_price'):
+                        try:
+                            self.logger.info(f"获取 {pos.symbol} 的最新标记价格...")
+                            current_price = self.framework.trader.get_mark_price(pos.symbol)
+                            if current_price and pos.entry_price:
+                                if pos.direction == 'long':
+                                    unrealized_pnl_pct = (current_price - pos.entry_price) / pos.entry_price
+                                else:
+                                    unrealized_pnl_pct = (pos.entry_price - current_price) / pos.entry_price
+                                pos_dict['current_price'] = current_price
+                                pos_dict['unrealized_pnl_pct'] = unrealized_pnl_pct
+                                self.logger.info(f"计算 {pos.symbol} 的未实现盈亏: 入场价={pos.entry_price}, 当前价={current_price}, 盈亏比例={unrealized_pnl_pct}")
+                        except Exception as e:
+                            self.logger.warning(f"计算持仓 {pos.symbol} 的未实现盈亏异常: {e}")
+                    
+                    positions_data.append(pos_dict)
+                
+                response_data = {
+                    "status": "success",
+                    "data": positions_data,
+                    "count": len(positions_data),
+                    "message": f"获取到 {len(positions_data)} 条持仓数据"
+                }
+                
+                self.logger.info(f"返回详细持仓查询响应: status=success, count={len(positions_data)}")
+                if len(positions_data) > 0:
+                    # 只打印第一条记录的示例
+                    self.logger.info(f"数据示例: {list(positions_data[0].keys())}")
+                
+                return web.json_response(response_data)
+            else:
+                self.logger.error("持仓管理器不支持load_positions方法!")
+                return web.json_response({
+                    "status": "error",
+                    "message": "持仓管理器不支持获取详细持仓数据"
+                }, status=400)
+                
+        except Exception as e:
+            self.logger.error(f"处理详细持仓数据请求异常: {e}", exc_info=True)
+            return web.json_response({
+                "status": "error",
+                "message": f"获取详细持仓数据失败: {str(e)}"
+            }, status=500)
+    
+    async def handle_api_position_sync(self, request: web.Request) -> web.Response:
+        """
+        处理同步持仓数据的API请求
+        
+        Args:
+            request: HTTP请求对象
+        
+        Returns:
+            web.Response: JSON响应，包含同步结果
+        """
+        try:
+            self.logger.info("处理同步持仓数据请求")
+            
+            # 获取请求体数据
+            try:
+                data = await request.json()
+            except:
+                data = {}
+                
+            # 获取需要同步的特定合约
+            symbol = data.get('symbol', None)
+            
+            # 执行同步
+            if hasattr(self.framework, 'sync_positions'):
+                result = await self.framework.sync_positions()
+                
+                return web.json_response({
+                    "status": "success" if result else "error",
+                    "message": "持仓数据同步完成" if result else "持仓数据同步失败"
+                })
+            else:
+                return web.json_response({
+                    "status": "error",
+                    "message": "交易框架不支持持仓数据同步"
+                }, status=400)
+                
+        except Exception as e:
+            self.logger.error(f"处理同步持仓数据请求异常: {e}", exc_info=True)
+            return web.json_response({
+                "status": "error",
+                "message": f"同步持仓数据失败: {str(e)}"
+            }, status=500)
     
     def get_routes(self, base_path: str = ""):
         """
@@ -508,6 +545,10 @@ class TradingFrameworkApiHandler:
         open_positions_path = f"{base_path}/api/open_positions" if base_path else "/api/open_positions"
         btc_price_path = f"{base_path}/api/btc_price_today" if base_path else "/api/btc_price_today"
         
+        # 新增持仓相关API路径
+        positions_path = f"{base_path}/api/data/positions" if base_path else "/api/data/positions"
+        position_sync_path = f"{base_path}/api/action/sync_positions" if base_path else "/api/action/sync_positions"
+        
         # 返回路由列表
         return [
             ('POST', trigger_path, self.handle_api_trigger),
@@ -516,7 +557,11 @@ class TradingFrameworkApiHandler:
             ('GET', daily_pnl_path, self.handle_api_daily_pnl),
             ('GET', position_history_path, self.handle_api_position_history),
             ('GET', open_positions_path, self.handle_api_open_positions),
-            ('GET', btc_price_path, self.handle_api_btc_price_today)
+            ('GET', btc_price_path, self.handle_api_btc_price_today),
+            
+            # 新增持仓相关路由
+            ('GET', positions_path, self.handle_api_positions),
+            ('POST', position_sync_path, self.handle_api_position_sync)
         ]
     
     def register_routes(self, app: web.Application, base_path: str = ""):

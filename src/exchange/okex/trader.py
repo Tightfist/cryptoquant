@@ -270,6 +270,96 @@ class OKExTrader(ExchangeAdapter):
         positions = response.get('data', [])
         self.logger.info("查询持仓信息", extra={"inst_type": inst_type, "position_count": len(positions)})
         return positions
+
+    def get_position_details(self, inst_id: str) -> dict:
+        """
+        查询特定合约的持仓详情
+        
+        Args:
+            inst_id: 合约ID，如 BTC-USDT-SWAP
+            
+        Returns:
+            dict: 持仓详情，如果不存在则返回空字典
+        """
+        positions = self.get_positions()
+        for pos in positions:
+            if pos.get('instId') == inst_id:
+                self.logger.info(f"获取持仓详情: {inst_id}", extra={
+                    "avg_price": pos.get('avgPx'),
+                    "pos_id": pos.get('posId'),
+                    "pos_side": pos.get('posSide'),
+                    "realized_pnl": pos.get('realizedPnl')
+                })
+                return pos
+        self.logger.info(f"未找到 {inst_id} 的持仓")
+        return {}
+
+    def get_position_history(self, inst_type: str = "SWAP", limit: int = 100, pos_id: str = None) -> list:
+        """
+        查询持仓历史，包括已平仓位置。支持按posId查询特定仓位的历史记录。
+        
+        Args:
+            inst_type: 产品类型，如 SWAP, SPOT
+            limit: 返回记录数，最大100
+            pos_id: 仓位ID，如果指定则只返回该仓位的历史记录
+        
+        Returns:
+            list: 持仓历史记录列表，每条记录包含以下字段：
+                - posId: 仓位ID
+                - instId: 产品ID
+                - openAvgPx: 开仓均价
+                - closeAvgPx: 平仓均价
+                - realizedPnl: 已实现收益
+                - fee: 手续费
+                - fundingFee: 资金费用
+                - closeTime: 平仓时间
+                - direction: 仓位方向 (long/short)
+                - lever: 杠杆倍数
+                - size: 仓位数量
+                - pnl: 总收益
+                - pnlRatio: 收益率
+        """
+        params = {
+            "instType": inst_type,
+            "limit": str(min(limit, 100))
+        }
+        
+        # 如果指定了posId，添加到查询参数中
+        if pos_id:
+            params["posId"] = pos_id
+            
+        response = self._request("GET", "/api/v5/account/positions-history", params)
+        history = response.get('data', [])
+        
+        # 处理返回数据，转换字段格式
+        formatted_history = []
+        for pos in history:
+            formatted_pos = {
+                'posId': pos.get('posId'),
+                'instId': pos.get('instId'),
+                'openAvgPx': float(pos.get('openAvgPx', 0)),  # 开仓均价
+                'closeAvgPx': float(pos.get('closeAvgPx', 0)),  # 平仓均价
+                'realizedPnl': float(pos.get('realizedPnl', 0)),  # 已实现收益
+                'fee': float(pos.get('fee', 0)),  # 手续费
+                'fundingFee': float(pos.get('fundingFee', 0)),  # 资金费用
+                'closeTime': int(pos.get('uTime', 0)),  # 平仓时间，使用uTime字段
+                'direction': pos.get('direction', pos.get('posSide', 'unknown')),  # 优先使用direction字段
+                'lever': float(pos.get('lever', 1)),  # 杠杆倍数
+                'size': float(pos.get('closeTotalPos', 0)),  # 平仓数量
+                'pnl': float(pos.get('pnl', 0)),  # 总收益
+                'pnlRatio': float(pos.get('pnlRatio', 0)),  # 收益率
+                'type': pos.get('type'),  # 平仓类型
+                'liqPenalty': float(pos.get('liqPenalty', 0))  # 强平罚金
+            }
+            formatted_history.append(formatted_pos)
+            
+        self.logger.info("查询持仓历史", extra={
+            "inst_type": inst_type,
+            "pos_id": pos_id,
+            "count": len(formatted_history)
+        })
+        
+        return formatted_history
         
     def set_leverage(self, inst_id: str, leverage: int, mgnMode: str = "cross") -> dict:
         """设置杠杆倍数"""
@@ -479,5 +569,19 @@ class OKExTrader(ExchangeAdapter):
         except Exception as e:
             self.logger.error(f"下单异常: {e}", exc_info=True)
             return {"error": str(e), "data": []}
+
+    def _sync_positions_on_startup(self):
+        # 为每个持仓从交易所获取最新数据
+        positions = self.get_positions()
+        for pos in positions:
+            position_detail = self.get_position_details(pos['instId'])
+            if position_detail and 'avgPx' in position_detail:
+                # 更新持仓对象的入场价格
+                if pos['instId'] in self.positions:
+                    self.positions[pos['instId']].entry_price = float(position_detail.get('avgPx', 0))
+                    # 更新已实现盈亏
+                    if 'realizedPnl' in position_detail:
+                        self.positions[pos['instId']].realized_pnl = float(position_detail.get('realizedPnl', 0))
+                    self.logger.info(f"从交易所更新持仓数据: {pos['instId']}, 入场价格: {self.positions[pos['instId']].entry_price}, 已实现盈亏: {self.positions[pos['instId']].realized_pnl}")
 
 

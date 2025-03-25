@@ -65,6 +65,7 @@ def configure_logger(app_name: str, log_level: str = "INFO", log_file: str = Non
     # 创建日志配置
     config = {
         "version": 1,
+        "disable_existing_loggers": False,  # 不禁用现有的日志器
         "formatters": {
             "detailed": {
                 "()": ExtraInfoFormatter,
@@ -72,7 +73,11 @@ def configure_logger(app_name: str, log_level: str = "INFO", log_file: str = Non
             }
         },
         "handlers": {},
-        "loggers": {}
+        "loggers": {},
+        "root": {  # 添加root日志配置
+            "level": "WARNING",
+            "handlers": []
+        }
     }
     
     # 根据输出目标添加处理器
@@ -100,18 +105,30 @@ def configure_logger(app_name: str, log_level: str = "INFO", log_file: str = Non
     config["loggers"] = {
         "OKExTrader": {
             "handlers": handlers,
-            "level": log_level
+            "level": log_level,
+            "propagate": False  # 不传播到父日志器
         },
         "Strategy": {
             "handlers": handlers,
-            "level": log_level
+            "level": log_level,
+            "propagate": False  # 不传播到父日志器
         },
         # 添加应用的日志配置
         app_name: {
             "handlers": handlers,
-            "level": log_level
+            "level": log_level,
+            "propagate": False  # 不传播到父日志器
         }
     }
     
+    # 添加root处理器到控制台
+    if 'console' in output_targets:
+        config["root"]["handlers"].append("console")
+    
     # 应用配置
     dictConfig(config)
+    
+    # 清除已存在的basicConfig配置，避免重复日志
+    for handler in logging.root.handlers[:]:
+        if isinstance(handler, logging.StreamHandler) and handler.formatter is None:
+            logging.root.removeHandler(handler)

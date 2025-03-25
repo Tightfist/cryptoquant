@@ -166,17 +166,21 @@ class HttpServer:
 
     def _add_api_routes(self):
         """添加API路由"""
-        # 添加HTML路由
+        # 添加静态文件路由
         self.app.router.add_static('/webhook/static', self.static_dir)
         self.app.router.add_get('/webhook/positions', self._handle_positions_page)
         
-        # 添加API路由
-        self.app.router.add_post('/webhook', self.message_handler.handle)
-        self.app.router.add_get('/webhook/api/open_positions', self.api_handler.handle_api_open_positions)
-        self.app.router.add_get('/webhook/api/position_history', self.api_handler.handle_api_position_history)
-        self.app.router.add_get('/webhook/api/daily_pnl', self.api_handler.handle_api_daily_pnl)
-        self.app.router.add_post('/webhook/api/trigger', self.api_handler.handle_api_trigger)
-        self.app.router.add_post('/webhook/api/close_all', self.api_handler.handle_api_close_all)
+        # 添加Webhook主路由
+        if self.message_handler:
+            self.app.router.add_post('/webhook', self.message_handler.handle)
+            self.logger.info("已注册Webhook主路由")
+        
+        # 添加API路由 - 使用api_handler.register_routes方法注册所有路由
+        if self.api_handler:
+            self.api_handler.register_routes(self.app, '/webhook')
+            self.logger.info("已使用api_handler.register_routes注册所有API路由")
+        else:
+            self.logger.warning("api_handler未初始化，无法注册API路由")
 
     async def _handle_positions_page(self, request):
         """处理仓位页面请求"""

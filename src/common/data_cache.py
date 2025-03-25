@@ -151,6 +151,9 @@ class OKExDataCache(DataCache):
         # 缓存过期时间（秒）
         self.cache_expiry_time = 60  # 1分钟
         
+        # 持仓数据缓存过期时间（秒）
+        self.position_ttl = 60  # 1分钟
+        
         # 合约面值缓存
         self._contract_size_cache = {}
         
@@ -169,6 +172,10 @@ class OKExDataCache(DataCache):
             'invalid_data_count': 0,
             'last_stat_time': time.time()
         }
+        
+        # 持仓数据缓存
+        self._position_cache = {}
+        self._position_last_update = {}
         
     def configure(self, config: Dict[str, Any]):
         """
@@ -1261,3 +1268,142 @@ class OKExDataCache(DataCache):
             self.logger.error(f"获取合约面值异常: {e}", exc_info=True)
             # 出错时使用默认值但不缓存错误值
             return 1
+
+    async def update_position_data(self, inst_id: str, data: Dict[str, Any]):
+        """
+        更新持仓数据缓存
+        
+        Args:
+            inst_id: 合约ID
+            data: 持仓数据
+        """
+        async with self._lock:
+            cache_key = f"position:{inst_id}" if inst_id else "position:all"
+            
+            # 检查数据有效性
+            if not data:
+                self.logger.warning(f"无效的持仓数据: {data}")
+                return
+                
+            # 更新缓存
+            self._data[cache_key] = {
+                "data": data,
+                "timestamp": time.time()
+            }
+            self._last_refresh[cache_key] = time.time()
+            
+            self.logger.debug(f"已更新持仓数据缓存: {cache_key}", extra={
+                "data_sample": str(data)[:200] + "..." if len(str(data)) > 200 else str(data)
+            })
+    
+    async def get_position_data(self, symbol: str, force_update: bool = False) -> Dict:
+        """
+        获取持仓数据，先检查缓存，如果没有或者缓存过期则从API获取
+        
+        Args:
+            symbol: 合约ID
+            force_update: 是否强制从API更新
+            
+        Returns:
+            Dict: 持仓数据
+        """
+        cache_key = f"position:{symbol}"
+        
+        # 检查是否需要强制更新或缓存过期
+        if force_update or cache_key not in self._data or (time.time() - self._last_refresh.get(cache_key, 0)) > self.position_ttl:
+            self.logger.info(f"从API获取持仓数据: {symbol}, 强制更新={force_update}")
+            
+            # 检查trader是否初始化
+            if self._direct_trader is None:
+                self.logger.warning(f"无法获取持仓数据: trader未初始化")
+                return {}
+            
+            # 查询持仓数据
+            try:
+                positions = self._direct_trader.get_position_details(symbol)
+                
+                self.logger.debug(f"API返回的持仓数据: {positions}")
+                
+                # 格式化数据
+                formatted_data = {
+                    "symbol": symbol,
+                    "data": None,
+                    "timestamp": int(time.time() * 1000)
+                }
+                
+                # 检查是否有该交易对的持仓
+                if positions and isinstance(positions, dict):
+                    # 直接使用返回的持仓数据
+                    if positions.get('instId') == symbol:
+                        # 收集并记录所有字段
+                        field_info = {
+                            "avgPx": positions.get('avgPx', '0'),  # 开仓均价
+                            "availPos": positions.get('availPos', '0'),  # 可平仓数量
+                            "posId": positions.get('posId', ''),  # 持仓ID
+                            "posSide": positions.get('posSide', 'net'),  # 持仓方向
+                            "pos": positions.get('pos', '0'),  # 持仓量
+                            "realizedPnl": positions.get('realizedPnl', '0'),  # 已实现收益
+                            "upl": positions.get('upl', '0'),  # 未实现收益
+                            "lever": positions.get('lever', '1'),  # 杠杆
+                            "uTime": positions.get('uTime', str(int(time.time() * 1000)))  # 最后更新时间
+                        }
+                        
+                        self.logger.info(f"获取到 {symbol} 的持仓数据字段: {field_info}")
+                        
+                        # 设置数据
+                        formatted_data["data"] = positions
+                    else:
+                        self.logger.warning(f"API返回的持仓数据中未找到匹配的交易对: {symbol}")
+                elif positions and isinstance(positions, list):
+                    # 如果返回的是列表，则遍历查找匹配的交易对
+                    position_found = False
+                    for pos in positions:
+                        if pos.get('instId') == symbol:
+                            # 找到匹配的持仓
+                            position_found = True
+                            
+                            # 收集并记录所有字段
+                            field_info = {
+                                "avgPx": pos.get('avgPx', '0'),  # 开仓均价
+                                "availPos": pos.get('availPos', '0'),  # 可平仓数量
+                                "posId": pos.get('posId', ''),  # 持仓ID
+                                "posSide": pos.get('posSide', 'net'),  # 持仓方向
+                                "pos": pos.get('pos', '0'),  # 持仓量
+                                "realizedPnl": pos.get('realizedPnl', '0'),  # 已实现收益
+                                "upl": pos.get('upl', '0'),  # 未实现收益
+                                "lever": pos.get('lever', '1'),  # 杠杆
+                                "uTime": pos.get('uTime', str(int(time.time() * 1000)))  # 最后更新时间
+                            }
+                            
+                            self.logger.info(f"获取到 {symbol} 的持仓数据字段: {field_info}")
+                            
+                            # 设置数据
+                            formatted_data["data"] = pos
+                            break
+                    
+                    if not position_found:
+                        self.logger.warning(f"API返回的持仓数据中未找到 {symbol} 的持仓")
+                else:
+                    self.logger.warning(f"API未返回任何持仓数据: {positions}")
+                
+                # 更新缓存
+                await self.update_position_data(symbol, formatted_data)
+                
+                return formatted_data
+            except Exception as e:
+                self.logger.error(f"从API获取持仓数据异常: {e}", exc_info=True)
+                return {}
+        else:
+            # 使用缓存数据
+            cached_data = self._data.get(cache_key, {}).get("data", {})
+            if cached_data:
+                self.logger.debug(f"使用缓存的持仓数据: {symbol}, 缓存时间: {self._last_refresh.get(cache_key, 0)}")
+                # 整理返回格式，确保与API获取时格式一致
+                return {
+                    "symbol": symbol,
+                    "data": cached_data,
+                    "timestamp": self._last_refresh.get(cache_key, 0)
+                }
+            else:
+                self.logger.warning(f"缓存中没有 {symbol} 的持仓数据")
+                return {}
