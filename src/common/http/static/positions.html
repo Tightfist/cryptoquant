@@ -107,16 +107,6 @@
             </div>
         </div>
 
-        <!-- 添加持仓同步按钮 -->
-        <div class="row mb-3">
-            <div class="col">
-                <button id="syncPositionsBtn" class="btn btn-outline-primary btn-sm">
-                    <i class="fas fa-sync-alt"></i> 同步持仓数据
-                </button>
-                <span id="lastSyncTime" class="text-muted ml-2" style="font-size: 0.8rem;"></span>
-            </div>
-        </div>
-
         <!-- 添加持仓数据表格 -->
         <div class="row">
             <div class="col">
@@ -1147,9 +1137,6 @@
             startLoading();
             
             try {
-                // 显示同步中状态
-                document.getElementById('lastSyncTime').textContent = '同步中...';
-                
                 // 调用API同步持仓
                 const response = await fetch('/api/close_all', {
                     method: 'POST',
@@ -1164,22 +1151,17 @@
                 const data = await response.json();
                 
                 if (data.status === 'success') {
-                    // 同步成功，记录同步时间
-                    const now = new Date();
-                    document.getElementById('lastSyncTime').textContent = `上次同步: ${now.toLocaleTimeString()}`;
                     console.log('持仓同步成功');
                     
                     // 同步成功后加载最新数据
                     await loadPositions();
                 } else {
-                    document.getElementById('lastSyncTime').textContent = '同步失败';
                     console.error('持仓同步失败:', data.message || '未知错误');
                     
                     // 尝试加载现有数据
                     await loadPositions();
                 }
             } catch (error) {
-                document.getElementById('lastSyncTime').textContent = '同步异常';
                 console.error('持仓同步异常:', error);
                 
                 // 尝试加载现有数据
@@ -1333,12 +1315,12 @@
             
             const totalPnl = document.getElementById('totalPnl');
             if (totalPnl.textContent === '加载中...') {
-                totalPnl.textContent = '0.00';
+                totalPnl.textContent = '0.00 USDT (0.00%)';
             }
             
             const todayPnl = document.getElementById('todayPnl');
             if (todayPnl.textContent === '加载中...') {
-                todayPnl.textContent = '0.00';
+                todayPnl.textContent = '0.00 USDT';
             }
             
             const winRate = document.getElementById('winRate');
@@ -1682,132 +1664,6 @@
                 container.innerHTML = cardsHtml;
         }
         
-        // 添加检查API数据按钮的功能
-        function addCheckApiDataButton() {
-            // 创建按钮
-            const buttonHtml = `
-                <button id="checkApiData" class="btn btn-info me-2">
-                    <i class="fas fa-bug"></i> 检查API数据
-                </button>
-            `;
-            
-            // 插入到刷新按钮旁边
-            const refreshBtn = document.getElementById('refreshBtn');
-            if (refreshBtn) {
-                refreshBtn.insertAdjacentHTML('beforebegin', buttonHtml);
-                
-                // 添加点击事件
-                document.getElementById('checkApiData').addEventListener('click', function() {
-                    fetchAndShowApiData();
-                });
-            }
-        }
-        
-        // 获取并显示API数据
-        function fetchAndShowApiData() {
-            startLoading();
-            
-            fetch(`${API_BASE_PATH}/status`)
-                .then(response => response.json())
-                .then(data => {
-                    console.log("API完整响应数据:", data);
-                    
-                    if (data && data.positions && data.positions.positions) {
-                        const positions = data.positions.positions;
-                        console.log("API返回的持仓数据:", positions);
-                        
-                        // 详细调试信息
-                        positions.forEach(pos => {
-                            console.log(`持仓 ${pos.symbol} 的详细信息:`);
-                            console.log(` - 方向: ${pos.direction}`);
-                            console.log(` - 入场价: ${pos.entry_price}`);
-                            console.log(` - 当前价: ${pos.current_price}`);
-                            console.log(` - 保证金: ${pos.margin}`);
-                            console.log(` - 杠杆: ${pos.leverage}`);
-                            console.log(` - 止盈比例: ${pos.signal?.take_profit_pct}`);
-                            console.log(` - 止损比例: ${pos.signal?.stop_loss_pct}`);
-                            console.log(` - 阶梯止盈: ${pos.ladder_tp ? '启用' : '禁用'}`);
-                            console.log(` - 阶梯止盈进度: ${pos.ladder_closed_pct || 0}`);
-                            console.log(` - 未实现盈亏: ${pos.unrealized_pnl}`);
-                            console.log(` - 已实现盈亏: ${pos.realized_pnl}`);
-                            
-                            // 计算预期的止盈止损价格
-                            const entryPrice = parseFloat(pos.entry_price);
-                            const direction = pos.direction;
-                            const tpPct = parseFloat(pos.signal?.take_profit_pct || 0);
-                            const slPct = parseFloat(pos.signal?.stop_loss_pct || 0);
-                            
-                            let expectedTp = 0, expectedSl = 0;
-                            if (direction === 'long') {
-                                expectedTp = entryPrice * (1 + tpPct / pos.leverage);
-                                expectedSl = entryPrice * (1 - slPct / pos.leverage);
-                            } else {
-                                expectedTp = entryPrice * (1 - tpPct / pos.leverage);
-                                expectedSl = entryPrice * (1 + slPct / pos.leverage);
-                            }
-                            
-                            console.log(` - 预期止盈价: ${expectedTp.toFixed(4)} (后端: ${pos.take_profit_price})`);
-                            console.log(` - 预期止损价: ${expectedSl.toFixed(4)} (后端: ${pos.stop_loss_price})`);
-                        });
-                        
-                        // 创建JSON显示弹窗
-                        showJsonDataModal(positions);
-                    } else {
-                        console.log("API响应中无持仓数据");
-                        showJsonDataModal([]);
-                    }
-                    
-                    stopLoading();
-                })
-                .catch(error => {
-                    console.error("获取API数据失败:", error);
-                    stopLoading();
-                });
-        }
-        
-        // 显示JSON数据弹窗
-        function showJsonDataModal(jsonData) {
-            // 创建模态框HTML
-            const modalHtml = `
-            <div class="modal fade" id="jsonDataModal" tabindex="-1" aria-labelledby="jsonDataModalLabel" aria-hidden="true">
-                <div class="modal-dialog modal-lg">
-                    <div class="modal-content">
-                        <div class="modal-header">
-                            <h5 class="modal-title" id="jsonDataModalLabel">API数据详情</h5>
-                            <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-                        </div>
-                        <div class="modal-body">
-                            <pre id="jsonContent" style="max-height: 500px; overflow-y: auto;">${JSON.stringify(jsonData, null, 2)}</pre>
-                        </div>
-                        <div class="modal-footer">
-                            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">关闭</button>
-                        </div>
-                    </div>
-                </div>
-            </div>
-            `;
-            
-            // 添加到DOM
-            document.body.insertAdjacentHTML('beforeend', modalHtml);
-            
-            // 显示模态框
-            const jsonModal = new bootstrap.Modal(document.getElementById('jsonDataModal'));
-            jsonModal.show();
-            
-            // 设置自动删除
-            document.getElementById('jsonDataModal').addEventListener('hidden.bs.modal', function () {
-                this.remove();
-            });
-        }
-        
-        // 初始化页面
-        $(document).ready(function() {
-            // ... [existing code]
-            
-            // 添加检查API数据按钮
-            addCheckApiDataButton();
-        });
-
         // 显示消息提示
         function showToast(title, message, type = 'info') {
             // 创建或获取toast容器
