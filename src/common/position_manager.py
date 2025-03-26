@@ -63,6 +63,13 @@ class Position:
             # 如果direction不是有效值，根据数量重新设置
             self.direction = "long" if self.quantity > 0 else "short"
             
+        # 确保close_time是整数类型
+        if not isinstance(self.close_time, int):
+            try:
+                self.close_time = int(self.close_time) if self.close_time else 0
+            except (ValueError, TypeError):
+                self.close_time = 0
+            
         # 记录原始的已实现盈亏值，便于调试  
         original_realized_pnl = self.realized_pnl
             
@@ -213,6 +220,7 @@ class PositionManager:
         self._add_column_if_not_exists("positions", "last_price", "REAL", 0.0)
         self._add_column_if_not_exists("positions", "signal", "TEXT", None)
         self._add_column_if_not_exists("positions", "direction", "TEXT", "long") # 确保添加方向列
+        self._add_column_if_not_exists("positions", "close_time", "INTEGER", 0) # 添加平仓时间字段
         
     def _column_exists(self, table, column):
         """检查表中是否存在指定列"""
@@ -399,6 +407,11 @@ class PositionManager:
                 if last_price_idx is not None and last_price_idx < len(row):
                     position.last_price = float(row[last_price_idx]) if row[last_price_idx] is not None else 0.0
                 
+                # 添加close_time字段
+                close_time_idx = column_names.index('close_time') if 'close_time' in column_names else None
+                if close_time_idx is not None and close_time_idx < len(row):
+                    position.close_time = row[close_time_idx] if row[close_time_idx] is not None else 0
+                
                 # 日志输出实际读取的值
                 self.logger.debug(f"加载 {symbol} 持仓: realized_pnl={position.realized_pnl}, margin={position.margin}, direction={position.direction}")
                 
@@ -488,7 +501,8 @@ class PositionManager:
                     unrealized_pnl = ?,
                     last_sync_time = ?,
                     margin = ?,
-                    last_price = ?
+                    last_price = ?,
+                    close_time = ?
                 WHERE position_id = ?
                 ''', (
                     position.symbol, 
@@ -516,6 +530,7 @@ class PositionManager:
                     position.last_sync_time,
                     position.margin,        # 确保这里是margin
                     position.last_price,
+                    position.close_time,    # 添加close_time
                     position.position_id
                 ))
             else:
@@ -547,8 +562,9 @@ class PositionManager:
                     unrealized_pnl,
                     last_sync_time,
                     margin,
-                    last_price
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    last_price,
+                    close_time
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (
                     position.symbol, 
                     position.position_id, 
@@ -575,7 +591,8 @@ class PositionManager:
                     position.unrealized_pnl,
                     position.last_sync_time,
                     position.margin,        # 确保这里是margin
-                    position.last_price
+                    position.last_price,
+                    position.close_time     # 添加close_time
                 ))
             
             self.conn.commit()
@@ -657,6 +674,9 @@ class PositionManager:
             if not exit_timestamp:
                 exit_timestamp = int(time.time() * 1000)
                 
+            # 记录本地平仓时间
+            local_close_time = exit_timestamp
+            
             with self.db_lock:
                 # 根据不同情况构建查询条件
                 if position_id:
@@ -694,15 +714,24 @@ class PositionManager:
                 # 打印详细日志
                 self.logger.info(f"平仓信息: {symbol}, 入场价={row[2]}, 出场价={exit_price}, " +
                                 f"盈亏金额={pnl_amount:.2f} USDT, 盈亏比例={pnl_percentage*100:.2f}%, " +
-                                f"持仓时间={holding_time}")
+                                f"持仓时间={holding_time}, 本地平仓时间={local_close_time}")
                 
-                # 更新仓位状态为已平仓
+                # 更新数据库结构以支持local_close_time字段
+                try:
+                    # 检查字段是否存在
+                    cursor = self.conn.execute("SELECT close_time FROM positions LIMIT 1")
+                except sqlite3.OperationalError:
+                    # 字段不存在，添加字段
+                    self.logger.info("添加local_close_time字段到positions表")
+                    self.conn.execute("ALTER TABLE positions ADD COLUMN close_time INTEGER")
+                
+                # 更新仓位状态为已平仓，并记录本地平仓时间
                 self.conn.execute(
-                    "UPDATE positions SET closed=1, exit_price=?, exit_timestamp=?, pnl_amount=?, pnl_percentage=? WHERE position_id=?",
-                    (exit_price, exit_timestamp, pnl_amount, pnl_percentage, row[1])
+                    "UPDATE positions SET closed=1, exit_price=?, exit_timestamp=?, pnl_amount=?, pnl_percentage=?, close_time=? WHERE position_id=?",
+                    (exit_price, exit_timestamp, pnl_amount, pnl_percentage, local_close_time, row[1])
                 )
                 self.conn.commit()
-                self.logger.info(f"仓位已标记为已平仓: {symbol}, position_id={row[1]}")
+                self.logger.info(f"仓位已标记为已平仓: {symbol}, position_id={row[1]}, close_time={local_close_time}")
                 
                 # 返回平仓的详细信息
                 entry_price = row[2]
@@ -722,7 +751,8 @@ class PositionManager:
                     "exit_timestamp": exit_timestamp,
                     "pnl_amount": pnl_amount,
                     "pnl_percentage": pnl_percentage * 100,  # 转为百分比
-                    "holding_time": holding_time
+                    "holding_time": holding_time,
+                    "close_time": local_close_time
                 }
                 
         except Exception as e:
@@ -1324,6 +1354,14 @@ class PositionManager:
             
             if last_price_idx is not None and last_price_idx < len(row):
                 position.last_price = float(row[last_price_idx]) if row[last_price_idx] is not None else 0.0
+            
+            # 添加close_time字段
+            close_time_idx = column_names.index('close_time') if 'close_time' in column_names else None
+            if close_time_idx is not None and close_time_idx < len(row):
+                position.close_time = row[close_time_idx] if row[close_time_idx] is not None else 0
+            
+            # 日志输出实际读取的值
+            self.logger.debug(f"加载 {symbol} 持仓: realized_pnl={position.realized_pnl}, margin={position.margin}, direction={position.direction}")
             
             self.logger.info(f"根据ID {pos_id} 获取到仓位: {position.symbol}, 方向={position.direction}, 入场价={position.entry_price}")
             return position

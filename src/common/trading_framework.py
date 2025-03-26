@@ -1143,6 +1143,7 @@ class BaseStrategy(ABC):
                     if abs(position.quantity) < 0.0001 or target_closed_pct >= 0.9999:
                         self.logger.info(f"{symbol} 持仓已全部平仓")
                         position.closed = True
+                        position.close_time = int(time.time() * 1000)
                         self.position_mgr.save_position(position)
                         self.positions.pop(symbol, None)
                         # 通知风控系统完全平仓 (确保计数器正确更新)
@@ -1347,6 +1348,7 @@ class BaseStrategy(ABC):
     async def _update_closed_position_info(self, pos_id: str, symbol: str, max_attempts=10, initial_delay=1, max_delay=30):
         """
         异步任务：持续尝试获取平仓后的历史数据，并更新到数据库
+        汇总符合条件的所有平仓记录收益，使用最近一次平仓价格
         
         Args:
             pos_id: 仓位ID
@@ -1358,7 +1360,6 @@ class BaseStrategy(ABC):
         self.logger.info(f"开始异步更新平仓信息任务: 仓位ID={pos_id}, 交易对={symbol}")
         
         delay = initial_delay
-        last_history_length = 0
         
         # 获取原始仓位信息，用于后续对比确认
         position = self.position_mgr.get_position_by_id(pos_id)
@@ -1370,61 +1371,84 @@ class BaseStrategy(ABC):
         original_open_time = position.timestamp  # 使用timestamp作为开仓时间
         original_direction = position.direction
         original_entry_price = position.entry_price
+        local_close_time = getattr(position, 'close_time', 0)  # 获取本地平仓时间
+        
+        if not local_close_time:
+            self.logger.warning(f"仓位未记录本地平仓时间，可能是旧数据: {pos_id}")
         
         for attempt in range(1, max_attempts + 1):
             self.logger.info(f"第{attempt}/{max_attempts}次尝试获取平仓历史数据: {pos_id}")
+            
             # 查询历史持仓数据
             history_data = self.trader.get_position_history(pos_id=pos_id)
             
             if history_data and len(history_data) > 0:
-                # 记录历史数据长度，用于判断是否有新数据
-                current_history_length = len(history_data)
+                # 找到所有符合条件的历史记录:
+                # 1. 交易对匹配
+                # 2. 方向匹配
+                # 3. 开仓价格接近
+                # 4. 平仓时间晚于开仓时间
+                matched_records = []
                 
-                # 如果历史数据长度没变，且不是第一次查询，可能需要等待更长时间
-                if current_history_length == last_history_length and last_history_length > 0:
-                    self.logger.info(f"历史数据长度未变: {current_history_length}，继续等待")
-                    last_history_length = current_history_length
-                else:
-                    last_history_length = current_history_length
-                
-                # 找到符合条件的历史记录
-                matched_record = None
                 for record in history_data:
-                    # 验证记录是否符合当前平仓的仓位
-                    # 条件1: 交易对匹配
-                    # 条件2: 方向匹配
-                    # 条件3: 开仓价格接近
-                    #self.logger.info(f"验证记录: {record} symbol: {symbol} original_direction: {original_direction} original_entry_price: {original_entry_price}")
                     if (record['instId'] == symbol and 
                         record['direction'] == original_direction and
                         abs(float(record['openAvgPx']) - original_entry_price) < 0.00000001):
-                        self.logger.info(f"验证记录通过: {record}")
-                        # 进一步验证平仓时间晚于开仓时间
+                        
                         close_time = int(record.get('closeTime', 0))
-                        self.logger.info(f"close_time: {close_time} original_open_time: {original_open_time}")
                         if close_time > original_open_time:
-                            matched_record = record
-                            self.logger.info(f"找到匹配的平仓记录: {matched_record}")
-                            break
+                            matched_records.append(record)
+                            self.logger.info(f"找到匹配的平仓记录: {record}")
                 
-                # 如果找到了匹配的记录
-                if matched_record:
+                # 按平仓时间排序
+                matched_records.sort(key=lambda x: int(x.get('closeTime', 0)))
+                
+                # 检查是否有最新的API数据
+                api_data_updated = False
+                if matched_records and local_close_time > 0:
+                    # 获取最近一次平仓记录
+                    latest_record = matched_records[-1]
+                    latest_close_time = int(latest_record.get('closeTime', 0))
+                    
+                    # 计算时间差（毫秒）
+                    time_diff = abs(latest_close_time - local_close_time)
+                    
+                    # 如果时间差在15秒内，认为API数据已更新
+                    if time_diff <= 15000:  # 15秒 = 15000毫秒
+                        api_data_updated = True
+                        self.logger.info(f"API数据已更新，时间差: {time_diff/1000:.2f}秒")
+                    else:
+                        self.logger.info(f"API数据可能未更新，时间差: {time_diff/1000:.2f}秒")
+                
+                # 只有当API数据已更新时，才进行处理
+                if api_data_updated and matched_records:
+                    # 汇总所有匹配记录的收益
+                    total_realized_pnl = 0.0
+                    for record in matched_records:
+                        pnl = float(record.get('realizedPnl', 0))
+                        total_realized_pnl += pnl
+                    
+                    # 使用最近一次平仓价格作为出场价格
+                    latest_exit_price = float(matched_records[-1]['closeAvgPx'])
+                    
                     # 更新仓位信息
-                    position.exit_price = float(matched_record['closeAvgPx'])
-                    position.realized_pnl = float(matched_record['realizedPnl'])
-                    position.pnl_amount = position.realized_pnl
+                    position.exit_price = latest_exit_price
+                    position.realized_pnl = total_realized_pnl
+                    position.pnl_amount = total_realized_pnl
                     position.unrealized_pnl = 0.0
-
+                    
                     # 保存更新后的仓位信息
                     self.position_mgr.save_position(position)
                     
-                    self.logger.info(f"成功更新平仓信息: 仓位ID={pos_id}, 平仓价={position.exit_price}, 已实现盈亏={position.realized_pnl}")
+                    self.logger.info(f"成功更新平仓信息: 仓位ID={pos_id}, 平仓价={position.exit_price}, " +
+                                   f"汇总已实现盈亏={position.realized_pnl}, 匹配记录数={len(matched_records)}")
                     return True
             
             # 如果是最后一次尝试，不再等待
             if attempt >= max_attempts:
-                self.logger.warning(f"达到最大尝试次数({max_attempts})，仍未找到匹配的平仓记录: {pos_id}")
+                self.logger.warning(f"达到最大尝试次数({max_attempts})，仍未找到匹配的平仓记录或API数据未更新: {pos_id}")
                 break
+            
             # 使用指数退避策略增加延迟
             delay = min(delay * 1.5, max_delay)
             self.logger.info(f"等待{delay:.1f}秒后重试...")
@@ -1432,6 +1456,7 @@ class BaseStrategy(ABC):
         
         self.logger.warning(f"无法获取平仓详细信息，使用默认值: 仓位ID={pos_id}")
         return False
+    
     def get_position_summary(self) -> Dict[str, Any]:
         """获取持仓摘要信息"""
         # 获取最新持仓数据

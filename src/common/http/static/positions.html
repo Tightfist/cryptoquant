@@ -242,6 +242,9 @@
         // 同步状态
         let isSyncing = false;
         
+        // 添加一个全局变量存储已渲染的历史仓位数据
+        let renderedPositionHistory = [];
+        
         // 初始化Bootstrap模态框
         const closePositionModal = new bootstrap.Modal(document.getElementById('closePositionModal'));
         const closeAllModal = new bootstrap.Modal(document.getElementById('closeAllModal'));
@@ -300,7 +303,7 @@
                 .then(() => {
                     // 3. 同步完成后加载持仓数据
                     console.log("同步持仓完成，加载最新持仓数据");
-            loadPositions(); 
+                    loadPositions(); 
                 })
                 .catch(error => {
                     console.error("数据加载过程中发生错误:", error);
@@ -311,18 +314,49 @@
             // 设置事件处理
             setupEventHandlers();
             
+            // 添加全局错误处理，防止意外清空表格
+            window.onerror = function(message, source, lineno, colno, error) {
+                console.error(`全局错误: ${message}`, error);
+                return false; // 不阻止默认错误处理
+            };
+            
             // 定时刷新数据
             setInterval(function() {
-                console.log("定时刷新触发");
+                console.log("定时刷新触发，正在增量更新数据...");
+                
+                // 记录当前表格状态
+                const currentTableState = document.getElementById('historyTableBody').innerHTML;
+                const hasExistingData = document.getElementById('historyTableBody').querySelectorAll('tr[data-position-id]').length > 0;
+                console.log(`定时刷新前: 表格是否有数据=${hasExistingData}, 有效行数=${document.getElementById('historyTableBody').querySelectorAll('tr[data-position-id]').length}`);
+                
                 // 注意顺序：先加载历史数据计算统计值，再加载持仓数据
                 loadPositionHistoryAndStats()
-                    .then(() => {
+                    .then(data => {
                         console.log("定时刷新：历史数据加载完成，正在加载持仓数据");
-                loadPositions();
+                        // 检查返回的数据是否有效
+                        if (!data || !data.data || !Array.isArray(data.data) || data.data.length === 0) {
+                            console.warn("定时刷新获取到空数据，检查表格状态");
+                            
+                            // 如果表格现在是空的，但刷新前有数据，则恢复原来的表格内容
+                            const tableNowEmpty = document.getElementById('historyTableBody').querySelectorAll('tr[data-position-id]').length === 0;
+                            if (tableNowEmpty && hasExistingData) {
+                                console.warn("表格被意外清空，正在恢复之前的状态");
+                                document.getElementById('historyTableBody').innerHTML = currentTableState;
+                            }
+                        }
+                        loadPositions();
                     })
                     .catch(error => {
                         console.error("定时刷新数据时发生错误:", error);
-                        // 出错也尝试加载持仓数据
+                        
+                        // 检查表格是否被清空，如果被清空且原来有数据，则恢复
+                        const tableNowEmpty = document.getElementById('historyTableBody').querySelectorAll('tr[data-position-id]').length === 0;
+                        if (tableNowEmpty && hasExistingData) {
+                            console.warn("出错导致表格被清空，正在恢复之前的状态");
+                            document.getElementById('historyTableBody').innerHTML = currentTableState;
+                        }
+                        
+                        // 尝试加载持仓数据
                         loadPositions();
                     });
             }, 30000);
@@ -350,10 +384,11 @@
             
             // 设置刷新按钮事件
             document.getElementById('refreshBtn').addEventListener('click', function() {
-                console.log("刷新按钮被点击，开始刷新数据...");
+                console.log("刷新按钮被点击，开始增量更新数据...");
                 // 显示加载状态
                 startLoading();
                 
+                // 不清空表格，保留现有数据，便于增量更新
                 // 注意顺序：先加载历史数据计算统计值，再加载持仓数据
                 loadPositionHistoryAndStats().then(() => {
                     console.log("历史数据加载完成，正在加载持仓数据...");
@@ -362,6 +397,9 @@
                     console.error("刷新数据时发生错误:", error);
                     // 出错也尝试加载持仓数据
                     loadPositions();
+                }).finally(() => {
+                    // 确保停止加载动画
+                    stopLoading();
                 });
             });
             
@@ -425,13 +463,33 @@
             // 不传任何日期参数，后端会默认使用当天日期
             const url = `/api/position_history`;
             
-            // 显示加载状态
-            document.getElementById('historyTableBody').innerHTML = '<tr><td colspan="10" class="text-center">载入中...</td></tr>';
+            // 只在表格真正为空时才显示加载状态，避免清空现有数据
+            const tableBody = document.getElementById('historyTableBody');
+            const currentRows = tableBody.querySelectorAll('tr');
+            if (currentRows.length === 0 || 
+                (currentRows.length === 1 && 
+                !currentRows[0].hasAttribute('data-position-id') && 
+                (currentRows[0].textContent.includes('没有') || 
+                 currentRows[0].textContent.includes('数据无效')))) {
+                // 只有在真正没有数据时才显示加载中
+                tableBody.innerHTML = '<tr><td colspan="10" class="text-center">载入中...</td></tr>';
+                console.log("表格为空，显示加载提示");
+            } else {
+                console.log(`保留现有表格数据: ${currentRows.length}行`);
+            }
             
             // 使用认证请求,并返回Promise以便链式调用
             return fetchWithAuth(url)
                 .then(data => {
                     if (data.success) {
+                        // 确保有数据
+                        if (!data.data || !Array.isArray(data.data)) {
+                            console.error("接收到的历史仓位数据格式不正确:", data);
+                            data.data = [];
+                        }
+                        
+                        console.log(`收到${data.data.length}条历史仓位数据`);
+                        
                         // 渲染历史仓位表格
                         renderPositionHistory(data.data);
                         
@@ -500,22 +558,90 @@
         function renderPositionHistory(positions) {
             const tableBody = document.getElementById('historyTableBody');
             
-            if (!positions || positions.length === 0) {
-                tableBody.innerHTML = '<tr><td colspan="10" class="text-center">没有历史仓位数据</td></tr>';
+            // 必要的数据验证
+            if (!positions || !Array.isArray(positions)) {
+                console.error("历史仓位数据无效:", positions);
+                tableBody.innerHTML = '<tr><td colspan="10" class="text-center">数据无效</td></tr>';
+                renderedPositionHistory = [];
                 return;
             }
             
-            let html = '';
+            if (positions.length === 0) {
+                tableBody.innerHTML = '<tr><td colspan="10" class="text-center">没有历史仓位数据</td></tr>';
+                renderedPositionHistory = [];
+                return;
+            }
+            
+            console.log(`渲染历史仓位数据: 接收到${positions.length}条记录`);
+            
+            // 过滤有效的已平仓记录
+            const validPositions = positions.filter(position => position && position.exit_timestamp && position.exit_timestamp > 0);
+            
+            if (validPositions.length === 0) {
+                tableBody.innerHTML = '<tr><td colspan="10" class="text-center">没有已平仓的历史仓位数据</td></tr>';
+                renderedPositionHistory = [];
+                return;
+            }
+            
+            console.log(`过滤后有${validPositions.length}条有效记录`);
             
             // 对仓位按照平仓时间倒序排序（最新的在前面）
-            positions.sort((a, b) => (b.exit_timestamp || 0) - (a.exit_timestamp || 0));
+            validPositions.sort((a, b) => (b.exit_timestamp || 0) - (a.exit_timestamp || 0));
+            
+            // 检查表格是否包含有效数据行
+            const currentRows = tableBody.querySelectorAll('tr[data-position-id]');
+            const totalRows = tableBody.querySelectorAll('tr');
+            
+            // 改进空表格检测：只有当没有任何data-position-id属性的行时才认为表格是空的
+            const isTableEmpty = currentRows.length === 0;
+            
+            // 获取当前表格中的所有仓位ID
+            const existingIds = isTableEmpty ? [] : 
+                Array.from(currentRows).map(row => row.getAttribute('data-position-id')).filter(id => id);
+            
+            console.log(`表格状态检查: 总行数=${totalRows.length}, 有效行数=${currentRows.length}, 是否空表=${isTableEmpty}, 现有ID数=${existingIds.length}`);
+            
+            // 判断渲染策略
+            if (isTableEmpty) {
+                // 表格真正为空，执行全量渲染
+                console.log('表格没有有效数据行，执行全量渲染');
+                renderAllHistoryPositions(validPositions);
+                renderedPositionHistory = [...positions];
+                return;
+            }
+            
+            // 检测是否有新数据
+            const newPositions = validPositions.filter(position => {
+                const posId = `${position.symbol}-${position.entry_timestamp || position.timestamp}`;
+                return !existingIds.includes(posId);
+            }).slice(0, 5); // 只检查前5条，提高性能
+            
+            if (newPositions.length > 0) {
+                // 有新数据，执行全量渲染
+                console.log(`检测到${newPositions.length}条新记录(前5条中)，执行全量渲染`);
+                renderAllHistoryPositions(validPositions, existingIds);
+            } else {
+                // 没有新数据，默认执行增量更新
+                console.log('没有检测到新记录，执行增量更新');
+                updateExistingHistoryPositions(validPositions);
+            }
+            
+            // 更新缓存的数据
+            renderedPositionHistory = [...positions];
+        }
+        
+        // 完整渲染所有历史仓位
+        function renderAllHistoryPositions(positions, existingIds = []) {
+            const tableBody = document.getElementById('historyTableBody');
+            let html = '';
             
             // 计算起始序号，使序号倒序排列（最早的交易序号为1）
             const startNum = positions.length;
             
             positions.forEach((position, index) => {
-                // 确保只处理已平仓的仓位 - 放宽条件，不再检查closed字段
-                if (position.exit_timestamp <= 0) return;
+                // 检查是否为新数据
+                const posId = `${position.symbol}-${position.entry_timestamp || position.timestamp}`;
+                const isNew = existingIds.length > 0 && !existingIds.includes(posId);
                 
                 // 序号倒序，最早的是1，最晚的是总数
                 const sequenceNumber = startNum - index; // 倒序序号
@@ -527,7 +653,7 @@
                 const exitTimeStr = position.exit_time || formatDateTime(position.exit_timestamp);
                 
                 html += `
-                <tr>
+                <tr data-position-id="${posId}" ${isNew ? 'class="table-success"' : ''}>
                     <td>#${sequenceNumber}</td>
                     <td>${exitTimeStr}</td>
                     <td>${position.symbol}</td>
@@ -539,12 +665,100 @@
                     <td class="${pnlClass}">${pnlAmount} (${pnlPercentage}%)</td>
                     <td>${position.holding_time || formatHoldingTime(position.entry_timestamp || position.timestamp, position.exit_timestamp)}</td>
                 </tr>`;
+                
+                // 限制最多显示20条，避免表格过长
+                if (index >= 19) return false;
             });
             
             if (html === '') {
                 tableBody.innerHTML = '<tr><td colspan="10" class="text-center">没有符合条件的历史仓位数据</td></tr>';
             } else {
+                // 保存滚动位置
+                const scrollTop = tableBody.closest('.table-responsive').scrollTop;
+                
                 tableBody.innerHTML = html;
+                
+                // 恢复滚动位置
+                tableBody.closest('.table-responsive').scrollTop = scrollTop;
+                
+                // 新行闪烁效果
+                setTimeout(() => {
+                    const highlightedRows = tableBody.querySelectorAll('tr.table-success');
+                    highlightedRows.forEach(row => {
+                        row.classList.remove('table-success');
+                    });
+                }, 2000);
+            }
+        }
+        
+        // 更新现有行中的数据
+        function updateExistingHistoryPositions(positions) {
+            const tableBody = document.getElementById('historyTableBody');
+            const rows = tableBody.querySelectorAll('tr');
+            
+            if (rows.length === 0) {
+                // 表格为空，执行全量渲染
+                renderAllHistoryPositions(positions);
+                return;
+            }
+            
+            // 保存滚动位置
+            const scrollTop = tableBody.closest('.table-responsive').scrollTop;
+            
+            // 更新行数据 - 保持现有行不变，只更新内容
+            let updated = false;
+            
+            // 为每一行找到对应的最新数据
+            Array.from(rows).forEach(row => {
+                const rowId = row.getAttribute('data-position-id');
+                if (!rowId) return; // 跳过没有ID的行
+                
+                // 找到这行对应的最新数据
+                const rowData = positions.find(pos => `${pos.symbol}-${pos.entry_timestamp || pos.timestamp}` === rowId);
+                if (!rowData) return; // 没找到对应数据，不更新
+                
+                // 获取行在positions中的索引，用于计算序号
+                const index = positions.findIndex(pos => `${pos.symbol}-${pos.entry_timestamp || pos.timestamp}` === rowId);
+                if (index === -1) return;
+                
+                updated = true; // 标记有更新
+                
+                // 计算序号
+                const sequenceNumber = positions.length - index;
+                
+                // 更新行数据
+                const pnlClass = (rowData.pnl_amount >= 0) ? 'profit' : 'loss';
+                const pnlAmount = rowData.pnl_amount ? rowData.pnl_amount.toFixed(2) : '0.00';
+                const pnlPercentage = rowData.pnl_percentage ? rowData.pnl_percentage.toFixed(2) : '0.00';
+                const direction = rowData.direction || (rowData.quantity > 0 ? 'long' : 'short');
+                const directionText = direction === 'long' ? '多' : '空';
+                const exitTimeStr = rowData.exit_time || formatDateTime(rowData.exit_timestamp);
+                
+                // 更新行内容
+                row.innerHTML = `
+                    <td>#${sequenceNumber}</td>
+                    <td>${exitTimeStr}</td>
+                    <td>${rowData.symbol}</td>
+                    <td>${directionText}</td>
+                    <td>${rowData.entry_price}</td>
+                    <td>${rowData.exit_price}</td>
+                    <td>${Math.abs(rowData.quantity)}</td>
+                    <td>${rowData.leverage}x</td>
+                    <td class="${pnlClass}">${pnlAmount} (${pnlPercentage}%)</td>
+                    <td>${rowData.holding_time || formatHoldingTime(rowData.entry_timestamp || rowData.timestamp, rowData.exit_timestamp)}</td>
+                `;
+            });
+            
+            // 恢复滚动位置
+            tableBody.closest('.table-responsive').scrollTop = scrollTop;
+            
+            // 如果没有任何行被更新，可能是因为当前表格中的记录在新数据中不存在
+            // 这种情况下执行全量渲染
+            if (!updated && positions.length > 0) {
+                console.log('当前表格中的记录在新数据中不存在，执行全量渲染');
+                renderAllHistoryPositions(positions);
+            } else if (updated) {
+                console.log('成功更新现有记录');
             }
         }
         
