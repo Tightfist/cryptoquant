@@ -230,7 +230,7 @@ class TradingViewSignalApp:
                 self.logger.warning(f"同时注册两个webhook路径: POST {webhook_path} 和 POST {webhook_path_no_slash}")
                 
                 # 获取API路由
-                for route in api_handler.get_routes():
+                for route in api_handler.get_routes(base_path=self.base_path):
                     routes.append(route)
                 
                 # 获取静态文件目录
