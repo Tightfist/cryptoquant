@@ -843,11 +843,17 @@ class BaseStrategy(ABC):
                     stop_loss_pct = signal.stop_loss_pct if signal and hasattr(signal, 'stop_loss_pct') and signal.stop_loss_pct is not None else self.stop_loss_pct
                     
                     # 添加诊断日志 - 调整前的原始止盈止损比例
-                    self.logger.info(f"【诊断】{symbol} 调整前的原始止盈止损百分比: 止盈={take_profit_pct*100:.2f}%, 止损={stop_loss_pct*100:.2f}%")
+                    # self.logger.info(f"【诊断】{symbol} 调整前的原始止盈止损百分比: 止盈={take_profit_pct*100:.2f}%, 止损={stop_loss_pct*100:.2f}%")
                     
                     trailing_stop = signal.trailing_stop if signal and hasattr(signal, 'trailing_stop') and signal.trailing_stop is not None else self.trailing_stop
                     trailing_distance = signal.trailing_distance if signal and hasattr(signal, 'trailing_distance') and signal.trailing_distance is not None else self.trailing_distance
                     
+                    if position.leverage > 1:
+                        take_profit_pct = take_profit_pct / position.leverage
+                        stop_loss_pct = stop_loss_pct  / position.leverage
+                        trailing_distance = trailing_distance / position.leverage
+                    self.logger.info(f"【诊断】{symbol} 调整后的止盈止损百分比: 止盈={take_profit_pct*100:.2f}%, 止损={stop_loss_pct*100:.2f}% 跟踪止损={trailing_distance*100:.2f}%")
+
                     # 调试日志 - 阶梯止盈
                     ladder_tp = getattr(position, 'ladder_tp', False)
                     ladder_tp_pct = getattr(position, 'ladder_tp_pct', 0.2)
@@ -862,24 +868,8 @@ class BaseStrategy(ABC):
                             self.logger.info(f"{symbol} 创新高: {mark_price}")
                         
                         # 计算止盈价和止损价
-                        take_profit_price_no_adj = position.entry_price * (1 + take_profit_pct)
-                        stop_loss_price_no_adj = position.entry_price * (1 - stop_loss_pct)
-                        
-                        # 添加诊断日志 - 未调整杠杆的止盈止损价格
-                        self.logger.info(f"【诊断】{symbol} 未调整杠杆的止盈止损价格: 止盈={take_profit_price_no_adj:.4f}, 止损={stop_loss_price_no_adj:.4f}")
-                        
-                        # 如果有杠杆，调整百分比
-                        if position.leverage > 1:
-                            adj_take_profit_pct = take_profit_pct / position.leverage
-                            adj_stop_loss_pct = stop_loss_pct / position.leverage
-                            self.logger.info(f"【诊断】{symbol} 调整后的止盈止损百分比: 止盈={adj_take_profit_pct*100:.2f}%, 止损={adj_stop_loss_pct*100:.2f}%")
-                            
-                            # 使用调整后的百分比计算价格
-                            take_profit_price = position.entry_price * (1 + adj_take_profit_pct)
-                            stop_loss_price = position.entry_price * (1 - adj_stop_loss_pct)
-                        else:
-                            take_profit_price = take_profit_price_no_adj
-                            stop_loss_price = stop_loss_price_no_adj
+                        take_profit_price = position.entry_price * (1 + take_profit_pct)
+                        stop_loss_price = position.entry_price * (1 - stop_loss_pct)
                         
                         # 如果开启了追踪止损，计算追踪止损价格
                         trailing_stop_price = None
@@ -896,24 +886,8 @@ class BaseStrategy(ABC):
                             self.logger.info(f"{symbol} 创新低: {mark_price}")
                         
                         # 计算止盈价和止损价
-                        take_profit_price_no_adj = position.entry_price * (1 - take_profit_pct)
-                        stop_loss_price_no_adj = position.entry_price * (1 + stop_loss_pct)
-                        
-                        # 添加诊断日志 - 未调整杠杆的止盈止损价格
-                        self.logger.info(f"【诊断】{symbol} 未调整杠杆的止盈止损价格: 止盈={take_profit_price_no_adj:.4f}, 止损={stop_loss_price_no_adj:.4f}")
-                        
-                        # 如果有杠杆，调整百分比
-                        if position.leverage > 1:
-                            adj_take_profit_pct = take_profit_pct / position.leverage
-                            adj_stop_loss_pct = stop_loss_pct / position.leverage
-                            self.logger.info(f"【诊断】{symbol} 调整后的止盈止损百分比: 止盈={adj_take_profit_pct*100:.2f}%, 止损={adj_stop_loss_pct*100:.2f}%")
-                            
-                            # 使用调整后的百分比计算价格
-                            take_profit_price = position.entry_price * (1 - adj_take_profit_pct)
-                            stop_loss_price = position.entry_price * (1 + adj_stop_loss_pct)
-                        else:
-                            take_profit_price = take_profit_price_no_adj
-                            stop_loss_price = stop_loss_price_no_adj
+                        take_profit_price = position.entry_price * (1 - take_profit_pct)
+                        stop_loss_price = position.entry_price * (1 + stop_loss_pct)
                         
                         # 如果开启了追踪止损，计算追踪止损价格
                         trailing_stop_price = None
@@ -1435,6 +1409,8 @@ class BaseStrategy(ABC):
                     position.exit_price = latest_exit_price
                     position.realized_pnl = total_realized_pnl
                     position.pnl_amount = total_realized_pnl
+                    if position.margin > 0:
+                        position.pnl_percentage = position.pnl_amount / position.margin
                     position.unrealized_pnl = 0.0
                     
                     # 保存更新后的仓位信息

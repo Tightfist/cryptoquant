@@ -647,7 +647,13 @@
                 const sequenceNumber = startNum - index; // 倒序序号
                 const pnlClass = (position.pnl_amount >= 0) ? 'profit' : 'loss';
                 const pnlAmount = position.pnl_amount ? position.pnl_amount.toFixed(2) : '0.00';
-                const pnlPercentage = position.pnl_percentage ? position.pnl_percentage.toFixed(2) : '0.00';
+                pnlPercentage = '0.00';
+                if (position.margin > 0) {
+                      pnlPercentage = (position.pnl_amount / position.margin).toFixed(2);
+                } else {
+                      pnlPercentage = position.pnl_percentage ? position.pnl_percentage.toFixed(2) : '0.00';
+                }
+                //const pnlPercentage = position.pnl_percentage ? position.pnl_percentage.toFixed(2) : '0.00';
                 const direction = position.direction || (position.quantity > 0 ? 'long' : 'short');
                 const directionText = direction === 'long' ? '多' : '空';
                 const exitTimeStr = position.exit_time || formatDateTime(position.exit_timestamp);
