@@ -230,7 +230,7 @@ class TradingViewSignalApp:
                 self.logger.warning(f"同时注册两个webhook路径: POST {webhook_path} 和 POST {webhook_path_no_slash}")
                 
                 # 获取API路由
-                for route in api_handler.get_routes(base_path=self.base_path):
+                for route in api_handler.get_routes():
                     routes.append(route)
                 
                 # 获取静态文件目录
@@ -274,11 +274,11 @@ class TradingViewSignalApp:
         try:
             # 获取端口
             port = str(self.port)
-            # 获取基础路径
+            # 获取基础路径 不用设置
             base_path = self.base_path
             
             # 生成脚本
-            scripts = generate_api_scripts(scripts_dir, self.app_name, port, base_path)
+            scripts = generate_api_scripts(scripts_dir, self.app_name, port)
             
             # 设置执行权限
             for script_path in scripts.values():
