@@ -19,22 +19,23 @@ from src.common.websocket.client import ExchangeWebSocketClient, OKExWebSocketCl
 class BaseMarketSubscriber(ABC):
     """市场数据订阅管理器基类"""
     
-    def __init__(self, cache: DataCache, config: Dict[str, Any], logger_name: str = "market_subscriber"):
+    def __init__(self, cache: DataCache, config: Dict[str, Any], app_name: str = "market_subscriber"):
         """
         初始化市场数据订阅器基类
         
         Args:
             cache: 数据缓存对象
             config: 配置信息
-            logger_name: 日志记录器名称
+            app_name: 应用程序名称
         """
         self.cache = cache
         self.config = config
-        self.logger = logging.getLogger(logger_name)
+        self.app_name = app_name
+        self.logger = logging.getLogger(app_name)
         
         # 策略配置
         self.strategy_config = config.get('strategy', {})
-        
+
         # 获取默认订阅的交易对
         self.default_symbols = self.strategy_config.get('default_symbols', [])
         
@@ -212,8 +213,8 @@ class OKExMarketSubscriber(BaseMarketSubscriber):
             config: 配置信息
             app_name: 应用名称，用于日志记录
         """
-        logger_name = app_name if app_name else "okex_market"
-        super().__init__(data_cache, config, logger_name)
+        app_name = app_name if app_name else "okex_market"
+        super().__init__(data_cache, config, app_name)
     
     def _init_websocket_client(self) -> ExchangeWebSocketClient:
         """初始化OKEx WebSocket客户端"""
@@ -221,7 +222,7 @@ class OKExMarketSubscriber(BaseMarketSubscriber):
         exchange_config = self.config.get('exchange', {})
         
         # 创建OKEx特定的客户端
-        client = OKExWebSocketClient(self.cache)
+        client = OKExWebSocketClient(self.cache, self.app_name)
         
         # 可以在这里设置自定义的URI
         custom_uri = exchange_config.get('ws_uri')

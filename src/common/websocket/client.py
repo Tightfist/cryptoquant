@@ -7,11 +7,11 @@ from typing import Callable, Optional, Dict, List, Any, Set
 
 class ExchangeWebSocketClient:
     """通用交易所WebSocket客户端"""
-    def __init__(self, cache, uri: str = None, exchange_name: str = "Generic"):
+    def __init__(self, cache, uri: str = None, app_name: str = "Generic"):
         self.uri = uri
         self.cache = cache
-        self.exchange_name = exchange_name
-        self.logger = logging.getLogger(f"{exchange_name}-WS")
+        self.app_name = app_name
+        self.logger = logging.getLogger(f"{app_name}.WS")
         self._reconnect_interval = 5
         self._active = True
         self.connection = None
@@ -272,8 +272,8 @@ class ExchangeWebSocketClient:
 
 class OKExWebSocketClient(ExchangeWebSocketClient):
     """OKEx行情订阅客户端"""
-    def __init__(self, cache, uri: str = "wss://ws.okx.com:8443/ws/v5/public"):
-        super().__init__(cache, uri, "OKEx")
+    def __init__(self, cache, app_name: str = "Generic", uri: str = "wss://ws.okx.com:8443/ws/v5/public"):
+        super().__init__(cache, uri, app_name)
         
     async def _process_message(self, data: Dict[str, Any]):
         """处理OKEx特定的消息格式"""
@@ -284,7 +284,7 @@ class OKExWebSocketClient(ExchangeWebSocketClient):
                 await self.cache.update(channel, item)
         elif 'event' in data:
             # 处理订阅确认等事件消息
-            self.logger.debug(f"收到事件: {data['event']}")
+            # self.logger.debug(f"收到事件: {data['event']}")
             
             # 如果是订阅成功事件，记录频道信息
             if data['event'] == 'subscribe' and 'arg' in data:

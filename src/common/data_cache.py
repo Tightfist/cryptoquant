@@ -10,11 +10,11 @@ from src.exchange.okex.trader import OKExTrader
 
 class DataCache:
     """线程安全的异步数据缓存"""
-    def __init__(self, exchange_name: str = "Generic"):
+    def __init__(self, app_name: str = "Generic"):
         self._data: Dict[str, Any] = {}
         self._lock = asyncio.Lock()
-        self.exchange_name = exchange_name
-        self.logger = logging.getLogger(f"{exchange_name}-Cache")
+        self.app_name = app_name
+        self.logger = logging.getLogger(f"{app_name}.datacache")
         self._custom_updaters: Dict[str, Callable] = {}
         
     def configure(self, config: Dict[str, Any]):
@@ -25,29 +25,29 @@ class DataCache:
             config: 配置字典
         """
         # 基类中提供默认实现，子类可以重写此方法
-        self.logger.info(f"配置 {self.exchange_name} 数据缓存")
+        self.logger.info(f"配置 {self.app_name} 数据缓存")
         
     @classmethod
-    def from_config(cls, config: Dict[str, Any], exchange_name: str = None):
+    def from_config(cls, config: Dict[str, Any], app_name: str = None):
         """
         从配置创建数据缓存实例
         
         Args:
             config: 配置字典
-            exchange_name: 交易所名称，如果为None则从config中获取
+            app_name: app名称，如果为None则从config中获取
             
         Returns:
             DataCache: 数据缓存实例
         """
-        if exchange_name is None:
-            exchange_name = config.get('exchange', {}).get('name', "Generic")
+        if app_name is None:
+            app_name = config.get('app_name', "Generic")
         
         # 添加日志
-        logging.getLogger('DataCache').info(f"从配置创建数据缓存实例, 交易所: {exchange_name}")
+        logging.getLogger(f"{app_name}.datacache").info(f"从配置创建数据缓存实例, APP: {app_name}")
         
         # 根据类型创建实例
-        if cls == DataCache:  # 基类需要exchange_name参数
-            instance = cls(exchange_name)
+        if cls == DataCache:  # 基类需要app_name参数
+            instance = cls(app_name)
         else:  # 但OKExDataCache的__init__不接受参数
             instance = cls()
             
@@ -77,7 +77,6 @@ class DataCache:
             if channel in self._custom_updaters:
                 await self._custom_updaters[channel](channel, data)
                 return
-                
             # 按频道分类存储
             if channel not in self._data:
                 self._data[channel] = {}
@@ -133,8 +132,8 @@ class DataCache:
 
 class OKExDataCache(DataCache):
     """OKEx特定的数据缓存实现"""
-    def __init__(self):
-        super().__init__("OKEx")
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
         # 注册OKEx特定的更新处理器
         self.register_updater("funding-rate", self._update_funding_rate)
         
@@ -149,7 +148,7 @@ class OKExDataCache(DataCache):
         self._cache_update_time = {}
         
         # 缓存过期时间（秒）
-        self.cache_expiry_time = 60  # 1分钟
+        self.cache_expiry_time = 15  # 1分钟
         
         # 持仓数据缓存过期时间（秒）
         self.position_ttl = 60  # 1分钟

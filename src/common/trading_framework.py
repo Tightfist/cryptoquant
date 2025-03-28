@@ -65,7 +65,8 @@ class BaseStrategy(ABC):
     def __init__(self, app_name: str, trader: OKExTrader, 
                  position_mgr: PositionManager, 
                  data_cache: OKExDataCache, 
-                 config: Dict[str, Any]):
+                 config: Dict[str, Any],
+                 market_subscriber: OKExMarketSubscriber):
         """
         初始化策略基类
         
@@ -81,9 +82,7 @@ class BaseStrategy(ABC):
         self.position_mgr = position_mgr
         self.data_cache = data_cache
         self.config = config
-        
-        # 市场数据订阅器，由TradingFramework在初始化后设置
-        self.market_subscriber = None
+        self.market_subscriber = market_subscriber
         
         # 获取策略配置
         self.strategy_config = config.get('strategy', {})
@@ -122,35 +121,16 @@ class BaseStrategy(ABC):
         self.logger = logging.getLogger(app_name)
         self.logger.info(f"加载已有仓位: {len(positions)}个")
 
-        # 平仓数据更新任务管理
-        self._closing_position_tasks = {}  # 存储pos_id -> task的映射
+        for symbol in list(positions.keys()):
+            if positions[symbol].closed:
+                continue
+            try:
+                self._subscribe_market_data(symbol)
+            except Exception as e:
+                self.logger.error(f"BaseStrategy 订阅 {symbol} 行情数据失败: {e}")
 
-        # 检查是否有全局阶梯止盈配置，如果有则应用到恢复的仓位中
-        if 'ladder_take_profit' in self.strategy_config:
-            ladder_config = self.strategy_config['ladder_take_profit']
-            ladder_tp = ladder_config.get('enabled', False)
-            ladder_tp_pct = ladder_config.get('close_pct', 0.2)
-            ladder_tp_step = ladder_config.get('step_pct', 0.2)
-            
-            # 应用到已恢复的所有仓位
-            if ladder_tp:
-                for symbol, position in positions.items():
-                    # 只有当仓位没有设置阶梯止盈或阶梯止盈为False时才应用全局配置
-                    if not hasattr(position, 'ladder_tp') or not position.ladder_tp:
-                        position.ladder_tp = ladder_tp
-                        position.ladder_tp_pct = ladder_tp_pct
-                        position.ladder_tp_step = ladder_tp_step
-                        # 更新数据库中的仓位记录
-                        self.position_mgr.save_position(position)
-                        self.logger.info(f"已将全局阶梯止盈配置应用到恢复的仓位 {symbol}: 启用={ladder_tp}, 步长={ladder_tp_step}, 每步平仓比例={ladder_tp_pct}")
-        
-        # 初始化价格高低记录，用于追踪止损
-        self._price_high_low = {}
-        
-        # 注意：此时market_subscriber还未设置，订阅操作将在TradingFramework初始化后执行
-        # 因此，我们将订阅操作存储起来，等market_subscriber设置后再执行
-        position_keys = positions.keys() if positions else []
-        self._pending_subscriptions = set(position_keys)
+        # 平仓数据更新任务管理
+        self._closing_position_tasks = {}  # 存储pos_id -> task的映射)
         
         # 策略状态
         self._strategy_status = "IDLE"
@@ -169,9 +149,6 @@ class BaseStrategy(ABC):
             "时间止损K线周期": f"{self.time_stop_candle_timeframe}分钟" if self.enable_time_stop else "禁用",
             "时间止损K线数量": self.time_stop_candle_count if self.enable_time_stop else "禁用"
         })
-        
-        # 内存缓存 - 避免频繁请求
-        self._contract_size_cache = {}
         
         # 初始化状态
         self.status = StrategyStatus.INITIALIZED
@@ -297,33 +274,14 @@ class BaseStrategy(ABC):
         Args:
             symbol: 交易对
         """
-        # 这个方法会被TradingFramework替换，但为了完整性，我们仍提供一个基本实现
         if self.market_subscriber:
             try:
-                self.logger.info(f"开始订阅交易对: {symbol}")
-                # 订阅行情
-                asyncio.ensure_future(self.market_subscriber.subscribe_symbol(symbol))
-                
-                # 订阅持仓量（如果WebSocket客户端支持）
-                if hasattr(self.market_subscriber, 'subscribe_open_interest'):
-                    asyncio.ensure_future(self.market_subscriber.subscribe_open_interest(symbol))
+                asyncio.get_event_loop().run_until_complete(self.market_subscriber.subscribe_symbol(symbol))
             except Exception as e:
                 self.logger.error(f"订阅 {symbol} 行情数据失败: {e}")
         else:
-            # 如果market_subscriber还未设置，将订阅请求加入等待队列
-            self._pending_subscriptions.add(symbol)
-            self.logger.debug(f"暂存订阅请求: {symbol}")
-    
-    # 添加一个方法，处理等待中的订阅请求
-    def _process_pending_subscriptions(self):
-        """处理等待中的订阅请求"""
-        if not self.market_subscriber or not self._pending_subscriptions:
-            return
-            
-        for symbol in self._pending_subscriptions:
-            self._subscribe_market_data(symbol)
-            
-        self._pending_subscriptions.clear()
+            # market_subscriber还未设置
+            self.logger.debug(f"_subscribe_market_data market_subscriber还未设置 ")
     
     @abstractmethod
     async def process_signal(self, signal_data: Dict[str, Any]) -> Tuple[bool, str]:
@@ -1119,7 +1077,6 @@ class BaseStrategy(ABC):
                         position.closed = True
                         position.close_time = int(time.time() * 1000)
                         self.position_mgr.save_position(position)
-                        self.positions.pop(symbol, None)
                         # 通知风控系统完全平仓 (确保计数器正确更新)
                         if hasattr(self.position_mgr, 'risk_controller'):
                             self.position_mgr.risk_controller.record_close_position(symbol, is_partial_close=False)
@@ -1615,14 +1572,7 @@ class BaseStrategy(ABC):
             
             # 策略状态设置为空闲
             self.update_strategy_status(StrategyStatus.IDLE)
-            
-            # 从内存中删除持仓信息
-            if symbol in self.positions:
-                del self.positions[symbol]
-                
-            # 清理价格记录
-            if symbol in self._price_high_low:
-                del self._price_high_low[symbol]
+
         except Exception as e:
             self.logger.error(f"执行平仓失败: {e}", exc_info=True)
             self.update_strategy_status(StrategyStatus.ERROR, str(e))
@@ -1826,16 +1776,7 @@ class TradingFramework:
         # 注意：这里不启动market_subscriber，而是在run_forever中启动
         
         # 初始化策略
-        self.strategy = strategy_class(app_name, self.trader, self.position_mgr, self.data_cache, self.config)
-        
-        # 设置策略的market_subscriber属性
-        self.strategy.market_subscriber = self.market_subscriber
-        
-        # 替换策略中的_subscribe_market_data方法
-        self.strategy._subscribe_market_data = self._subscribe_market_data
-        
-        # 处理策略中等待的订阅请求
-        self.strategy._process_pending_subscriptions()
+        self.strategy = strategy_class(app_name, self.trader, self.position_mgr, self.data_cache, self.config, self.market_subscriber)
         
         # 初始化风控系统的持仓数量
         if hasattr(self.position_mgr, 'risk_controller'):
@@ -1849,20 +1790,6 @@ class TradingFramework:
             if hasattr(self.position_mgr.risk_controller, 'set_data_cache'):
                 self.position_mgr.risk_controller.set_data_cache(self.data_cache)
                 self.logger.info("已为风控系统设置数据缓存引用")
-    
-    def _subscribe_market_data(self, symbol: str):
-        """
-        订阅标的物的行情数据
-        
-        Args:
-            symbol: 交易对
-        """
-        try:
-            self.logger.info(f"订阅 {symbol} 行情数据")
-            # 使用market_subscriber订阅行情
-            asyncio.ensure_future(self.market_subscriber.subscribe_symbol(symbol))
-        except Exception as e:
-            self.logger.error(f"订阅 {symbol} 行情数据失败: {e}")
     
     async def process_signal(self, signal_data: Dict[str, Any]) -> Tuple[bool, str]:
         """
@@ -1896,6 +1823,9 @@ class TradingFramework:
         self.monitor_interval = position_monitor_interval
         self.logger.info(f"持仓监控间隔: {position_monitor_interval}秒")
         
+        # 初始化推送组件
+        await self.market_subscriber.start()
+
         error_count = 0
         while True:
             try:
@@ -1913,12 +1843,6 @@ class TradingFramework:
                     else:
                         self.logger.warning(f"无法重置风控每日计数器，risk_controller不存在")
                     last_reset_date = current_date
-                
-                # 启动行情订阅
-                if not getattr(self, 'market_data_subscriber_started', False):
-                    if hasattr(self, 'market_data_subscriber') and self.market_data_subscriber:
-                        await self.market_data_subscriber.start()
-                        self.market_data_subscriber_started = True
 
                 # 实现每分钟执行一次_sync_positions_task
                 current_minute = datetime.now().minute
@@ -1938,9 +1862,6 @@ class TradingFramework:
                 
             except KeyboardInterrupt:
                 self.logger.info("收到键盘中断信号，退出策略运行")
-                if getattr(self, 'market_data_subscriber_started', False) and hasattr(self, 'market_data_subscriber') and self.market_data_subscriber:
-                    await self.market_data_subscriber.stop()
-                break
                 
             except Exception as e:
                 error_count += 1
