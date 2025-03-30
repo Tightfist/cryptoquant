@@ -204,112 +204,140 @@ class TradingViewStrategy(BaseStrategy):
         解析开仓信号
         
         Args:
-            signal_data: TradingView信号数据
-            direction: 开仓方向 (long或short)
+            signal_data: TradingView webhook发送的原始信号数据
+            direction: 交易方向，'long' 或 'short'
             
         Returns:
             Optional[TradeSignal]: 解析后的交易信号
         """
         try:
-            # 获取策略信息
-            strategy = signal_data.get('strategy', {})
-            
-            # 获取交易对
-            symbol = strategy.get('market', signal_data.get('symbol'))
-            if not symbol:
-                self.logger.warning("信号缺少交易对信息")
+            # 检查信号数据格式
+            if not signal_data:
                 return None
                 
-            # 转换合约名称
-            okex_symbol = self._convert_symbol(symbol)
-            
-            # 获取其他参数
-            entry_price = strategy.get('price', signal_data.get('price'))
-            quantity = strategy.get('contracts', signal_data.get('contracts'))
-            
-            # 获取仓位大小（USDT金额）
-            position_usdt = strategy.get('position_usdt', signal_data.get('position_usdt'))
-            
-            # 获取止盈止损参数
-            # 允许使用不同的字段名
-            tp_price = strategy.get('tp_price', signal_data.get('tp_price'))
-            sl_price = strategy.get('sl_price', signal_data.get('sl_price'))
-            
-            # 如果有价格而没有比例，则计算比例
-            take_profit_pct = strategy.get('tp_pct', signal_data.get('tp_pct'))
-            stop_loss_pct = strategy.get('sl_pct', signal_data.get('sl_pct'))
-            
-            if tp_price and entry_price and not take_profit_pct:
-                if direction == "long":
-                    take_profit_pct = (float(tp_price) - float(entry_price)) / float(entry_price)
-                else:
-                    take_profit_pct = (float(entry_price) - float(tp_price)) / float(entry_price)
+            # 尝试从多种可能的格式中获取symbol
+            symbol = None
+            for field in ['symbol', 'ticker', 'market', 'pair']:
+                if field in signal_data:
+                    symbol = signal_data[field]
+                    break
                     
-            if sl_price and entry_price and not stop_loss_pct:
-                if direction == "long":
-                    stop_loss_pct = (float(entry_price) - float(sl_price)) / float(entry_price)
-                else:
-                    stop_loss_pct = (float(sl_price) - float(entry_price)) / float(entry_price)
+            if not symbol and 'strategy' in signal_data and 'market' in signal_data['strategy']:
+                symbol = signal_data['strategy']['market']
+                
+            if not symbol:
+                self.logger.error("信号中未找到交易对信息")
+                return None
+                
+            # 转换symbol格式
+            converted_symbol = self._convert_symbol(symbol)
             
-            # 获取追踪止损设置
-            trailing_stop = strategy.get('trailing_stop', signal_data.get('trailing_stop'))
-            trailing_distance = strategy.get('trailing_distance', signal_data.get('trailing_distance'))
+            # 获取入场价格 - 优先使用信号中指定的价格，否则使用市场价
+            entry_price = None
+            if 'price' in signal_data:
+                entry_price = float(signal_data['price'])
+            elif 'entry_price' in signal_data:
+                entry_price = float(signal_data['entry_price'])
+                
+            # 默认设置
+            position_size = None  # 会使用默认的仓位大小
+            take_profit_pct = self.take_profit_pct
+            stop_loss_pct = self.stop_loss_pct
+            trailing_stop = self.trailing_stop
+            trailing_distance = self.trailing_distance
+            unit_type = self.unit_type
+            leverage = self.leverage
+            extra_data = {}
             
-            # 获取杠杆设置
-            leverage = strategy.get('leverage', signal_data.get('leverage'))
+            # 检查是否在信号中指定了这些参数
+            if 'size' in signal_data:
+                position_size = float(signal_data['size'])
+            elif 'quantity' in signal_data:
+                position_size = float(signal_data['quantity'])
+            elif 'amount' in signal_data:
+                position_size = float(signal_data['amount'])
+                
+            # 检查止盈止损设置
+            if 'take_profit_pct' in signal_data:
+                take_profit_pct = float(signal_data['take_profit_pct'])
+            elif 'take_profit' in signal_data:
+                take_profit_pct = float(signal_data['take_profit'])
+                
+            if 'stop_loss_pct' in signal_data:
+                stop_loss_pct = float(signal_data['stop_loss_pct'])
+            elif 'stop_loss' in signal_data:
+                stop_loss_pct = float(signal_data['stop_loss'])
+                
+            # 检查追踪止损设置
+            if 'trailing_stop' in signal_data:
+                trailing_stop_value = signal_data['trailing_stop']
+                if isinstance(trailing_stop_value, bool):
+                    trailing_stop = trailing_stop_value
+                elif isinstance(trailing_stop_value, str):
+                    trailing_stop = trailing_stop_value.lower() == 'true'
+                elif isinstance(trailing_stop_value, (int, float)):
+                    trailing_stop = trailing_stop_value > 0
+                    
+            if 'trailing_distance' in signal_data:
+                trailing_distance = float(signal_data['trailing_distance'])
+                
+            # 检查杠杆设置
+            if 'leverage' in signal_data:
+                leverage = int(signal_data['leverage'])
+                
+            # 检查单位类型设置
+            if 'unit_type' in signal_data:
+                unit_type = signal_data['unit_type']
+                
+            # 检查阶梯止盈设置
+            ladder_tp = False
+            ladder_tp_step = 0.2  # 默认每上涨20%触发一次
+            ladder_tp_pct = 0.2   # 默认每次平仓20%
             
-            # 获取阶梯止盈设置
-            ladder_tp = strategy.get('ladder_tp', signal_data.get('ladder_tp', False))
-            ladder_tp_pct = strategy.get('ladder_tp_pct', signal_data.get('ladder_tp_pct', 0.2))
-            ladder_tp_step = strategy.get('ladder_tp_step', signal_data.get('ladder_tp_step', 0.2))
+            if 'ladder_tp' in signal_data:
+                ladder_tp_value = signal_data['ladder_tp']
+                if isinstance(ladder_tp_value, bool):
+                    ladder_tp = ladder_tp_value
+                elif isinstance(ladder_tp_value, str):
+                    ladder_tp = ladder_tp_value.lower() == 'true'
+                elif isinstance(ladder_tp_value, (int, float)):
+                    ladder_tp = ladder_tp_value > 0
             
-            # 获取风控参数
-            risk_control = {}
-            
-            # 最大持仓数
-            max_positions = strategy.get('max_positions', signal_data.get('max_positions'))
-            if max_positions is not None:
-                risk_control['max_positions'] = int(max_positions)
-                risk_control['enable_max_positions'] = True
-            
-            # 低交易额过滤
-            min_volume_filter = strategy.get('min_volume_filter', signal_data.get('min_volume_filter'))
-            if min_volume_filter is not None:
-                risk_control['min_volume_filter'] = float(min_volume_filter)
-                risk_control['enable_volume_filter'] = float(min_volume_filter) > 0
-            
-            # 整合额外数据
-            extra_data = {
-                'original_symbol': symbol,
-                'entry_time': time.time(),
-                'signal_source': 'tradingview'
-            }
-            
-            # 无论是否为空，都添加风控参数到extra_data
-            extra_data['risk_control'] = risk_control
-            
-            # 添加阶梯止盈参数
+            if 'ladder_tp_step' in signal_data:
+                ladder_tp_step = float(signal_data['ladder_tp_step'])
+                
+            if 'ladder_tp_pct' in signal_data:
+                ladder_tp_pct = float(signal_data['ladder_tp_pct'])
+                
             if ladder_tp:
-                extra_data['ladder_tp'] = True
-                extra_data['ladder_tp_pct'] = float(ladder_tp_pct)
-                extra_data['ladder_tp_step'] = float(ladder_tp_step)
-            
-            # 创建交易信号
-            signal = TradeSignal(
+                extra_data['ladder_tp'] = ladder_tp
+                extra_data['ladder_tp_step'] = ladder_tp_step
+                extra_data['ladder_tp_pct'] = ladder_tp_pct
+                
+            # 处理退出策略配置
+            if 'exit_strategies' in signal_data:
+                exit_strategies_config = signal_data['exit_strategies']
+                extra_data['exit_strategies'] = exit_strategies_config
+                self.logger.info(f"信号中包含退出策略配置: {exit_strategies_config}")
+                
+            # 创建交易信号对象
+            trade_signal = TradeSignal(
                 action="open",
-                symbol=okex_symbol,
+                symbol=converted_symbol,
                 direction=direction,
-                entry_price=float(entry_price) if entry_price else None,
-                quantity=float(quantity) if quantity else None,
-                take_profit_pct=float(take_profit_pct) if take_profit_pct else None,
-                stop_loss_pct=float(stop_loss_pct) if stop_loss_pct else None,
-                trailing_stop=bool(trailing_stop) if trailing_stop is not None else None,
-                trailing_distance=float(trailing_distance) if trailing_distance else None,
-                leverage=int(leverage) if leverage else None,
+                entry_price=entry_price,
+                quantity=position_size,
+                take_profit_pct=take_profit_pct,
+                stop_loss_pct=stop_loss_pct,
+                trailing_stop=trailing_stop,
+                trailing_distance=trailing_distance,
+                leverage=leverage,
+                unit_type=unit_type,
                 extra_data=extra_data
             )
             
-            return signal
+            return trade_signal
+            
         except Exception as e:
             self.logger.exception(f"解析开仓信号异常: {e}")
             return None
