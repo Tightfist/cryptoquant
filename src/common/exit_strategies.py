@@ -11,6 +11,9 @@ from dataclasses import dataclass, field
 import time
 import logging
 import asyncio
+import numpy as np
+import pandas as pd
+from typing import Optional
 
 # 平仓触发类型枚举
 class ExitTriggerType(str, Enum):
@@ -111,6 +114,9 @@ class ExitStrategy(ABC):
                 success, msg = await execute_close_func(symbol, position, close_percentage)
                 if success:
                     self.logger.info(f"{symbol} {exit_signal.exit_type} 平仓成功: {msg}")
+                    # 如果完全平仓，清理与该symbol相关的资源
+                    if close_percentage >= 0.999:
+                        self.clean_symbol_resources(symbol, position.id if hasattr(position, 'id') else None)
                 else:
                     self.logger.error(f"{symbol} {exit_signal.exit_type} 平仓失败: {msg}")
                 return success
@@ -123,6 +129,27 @@ class ExitStrategy(ABC):
         except Exception as e:
             self.logger.error(f"执行平仓失败: {e}", exc_info=True)
             return False
+    
+    def clean_symbol_resources(self, symbol: str, position_id: str = None):
+        """
+        清理与指定交易对相关的资源
+        
+        Args:
+            symbol: 交易对
+            position_id: 仓位ID，如果提供则只清理该仓位的资源
+        """
+        # 基类实现为空，子类根据需要重写
+        pass
+    
+    def init_position_resources(self, position: Any):
+        """
+        初始化仓位相关资源
+        
+        Args:
+            position: 仓位对象
+        """
+        # 基类实现为空，子类根据需要重写
+        pass
     
     @abstractmethod
     def to_dict(self) -> Dict[str, Any]:
@@ -214,7 +241,7 @@ class FixedPercentExitStrategy(ExitStrategy):
         
         # 添加日志
         self.logger.debug(f"检查 {position.symbol} 固定止盈止损条件: 入场价={entry_price}, 当前价={current_price}, "
-                         f"止盈比例={take_profit_pct*100:.2f}%, 止损比例={stop_loss_pct*100:.2f}%")
+                         f"止盈比例={take_profit_pct*100:.2f}%, 价格={entry_price * (1 + take_profit_pct)}; 止损比例={stop_loss_pct*100:.2f}%, 价格={entry_price * (1 - stop_loss_pct)}")
         
         if direction == "long":
             # 多头止盈
@@ -320,10 +347,58 @@ class TrailingStopExitStrategy(ExitStrategy):
             self.activation_pct = activation_pct
         
         # 跟踪的最高价和最低价，初始为0和无穷大
-        self.highest_price = {}  # symbol -> highest_price 映射
-        self.lowest_price = {}   # symbol -> lowest_price 映射
+        # 修改为使用(symbol, position_id)作为key的字典，以支持同一交易对多个仓位
+        self.highest_price = {}  # (symbol, position_id) -> highest_price 映射
+        self.lowest_price = {}   # (symbol, position_id) -> lowest_price 映射
         
         self.logger.info(f"追踪止损策略参数: 追踪距离={self.trailing_distance*100:.2f}%, 激活收益={self.activation_pct*100:.2f}%")
+    
+    def _get_position_key(self, position):
+        """获取仓位的唯一键"""
+        position_id = getattr(position, 'id', None) or getattr(position, 'position_id', str(id(position)))
+        return (position.symbol, position_id)
+    
+    def init_position_resources(self, position: Any):
+        """初始化仓位相关资源"""
+        key = self._get_position_key(position)
+        symbol = position.symbol
+        entry_price = position.entry_price
+        
+        # 使用position的high_price和low_price，如果有的话
+        if hasattr(position, 'high_price') and position.high_price:
+            self.highest_price[key] = position.high_price
+        else:
+            self.highest_price[key] = entry_price
+            
+        if hasattr(position, 'low_price') and position.low_price and position.low_price != float('inf'):
+            self.lowest_price[key] = position.low_price
+        else:
+            self.lowest_price[key] = entry_price
+            
+        self.logger.info(f"初始化追踪止损仓位资源: {symbol} (ID: {key[1]}), 入场价: {entry_price}")
+    
+    def clean_symbol_resources(self, symbol: str, position_id: str = None):
+        """清理与指定交易对相关的资源"""
+        keys_to_remove = []
+        
+        # 如果指定了仓位ID，只清理该仓位的资源
+        if position_id:
+            key = (symbol, position_id)
+            if key in self.highest_price:
+                del self.highest_price[key]
+            if key in self.lowest_price:
+                del self.lowest_price[key]
+            self.logger.info(f"清理追踪止损资源: {symbol} (ID: {position_id})")
+        else:
+            # 否则清理该交易对的所有资源
+            for key in list(self.highest_price.keys()):
+                if key[0] == symbol:
+                    del self.highest_price[key]
+                    self.logger.info(f"清理追踪止损资源: {symbol} (ID: {key[1]})")
+            
+            for key in list(self.lowest_price.keys()):
+                if key[0] == symbol:
+                    del self.lowest_price[key]
     
     async def check_exit_condition(self, position: Any, current_price: float, **kwargs) -> ExitSignal:
         """
@@ -347,6 +422,9 @@ class TrailingStopExitStrategy(ExitStrategy):
         entry_price = position.entry_price
         leverage = getattr(position, 'leverage', 1)
         
+        # 获取仓位的唯一键
+        key = self._get_position_key(position)
+        
         # 获取追踪止损设置
         signal = getattr(position, 'signal', None)
         trailing_distance = signal.trailing_distance if signal and hasattr(signal, 'trailing_distance') and signal.trailing_distance is not None else self.trailing_distance
@@ -364,38 +442,21 @@ class TrailingStopExitStrategy(ExitStrategy):
             activation_pct = activation_pct / leverage
         
         # 初始化最高/最低价
-        if symbol not in self.highest_price:
-            # 使用position的high_price，如果有的话
-            if hasattr(position, 'high_price') and position.high_price:
-                self.highest_price[symbol] = position.high_price
-            else:
-                self.highest_price[symbol] = max(entry_price, current_price)
-                
-        if symbol not in self.lowest_price:
-            # 使用position的low_price，如果有的话
-            if hasattr(position, 'low_price') and position.low_price and position.low_price != float('inf'):
-                self.lowest_price[symbol] = position.low_price
-            else:
-                self.lowest_price[symbol] = min(entry_price, current_price)
+        if key not in self.highest_price or key not in self.lowest_price:
+            self.init_position_resources(position)
         
         # 计算当前收益率
         if direction == "long":
             pnl_pct = (current_price - entry_price) / entry_price
             
             # 更新最高价
-            if current_price > self.highest_price[symbol]:
-                self.highest_price[symbol] = current_price
-                # 同时更新position的high_price
-                if hasattr(position, 'high_price'):
-                    position.high_price = current_price
-                    if self.position_mgr:
-                        self.position_mgr.save_position(position)
-                self.logger.info(f"{symbol} 新高: {current_price}")
+            if current_price > self.highest_price[key]:
+                self.highest_price[key] = current_price
             
             # 只有当收益率超过激活百分比时才启用追踪止损
             if pnl_pct >= activation_pct:
                 # 计算追踪止损价格
-                stop_price = self.highest_price[symbol] * (1 - trailing_distance)
+                stop_price = self.highest_price[key] * (1 - trailing_distance)
                 
                 # 检查是否触发追踪止损
                 if current_price <= stop_price:
@@ -404,25 +465,19 @@ class TrailingStopExitStrategy(ExitStrategy):
                         exit_type=ExitTriggerType.TRAILING_STOP,
                         close_percentage=1.0,
                         price=current_price,
-                        message=f"触发追踪止损: 最高价={self.highest_price[symbol]:.4f}, 当前价={current_price:.4f}, 止损线={stop_price:.4f}"
+                        message=f"触发追踪止损: 最高价={self.highest_price[key]:.4f}, 当前价={current_price:.4f}, 止损线={stop_price:.4f}"
                     )
         else:  # short
             pnl_pct = (entry_price - current_price) / entry_price
             
             # 更新最低价
-            if current_price < self.lowest_price[symbol]:
-                self.lowest_price[symbol] = current_price
-                # 同时更新position的low_price
-                if hasattr(position, 'low_price'):
-                    position.low_price = current_price
-                    if self.position_mgr:
-                        self.position_mgr.save_position(position)
-                self.logger.info(f"{symbol} 新低: {current_price}")
+            if current_price < self.lowest_price[key]:
+                self.lowest_price[key] = current_price
             
             # 只有当收益率超过激活百分比时才启用追踪止损
             if pnl_pct >= activation_pct:
                 # 计算追踪止损价格
-                stop_price = self.lowest_price[symbol] * (1 + trailing_distance)
+                stop_price = self.lowest_price[key] * (1 + trailing_distance)
                 
                 # 检查是否触发追踪止损
                 if current_price >= stop_price:
@@ -431,7 +486,7 @@ class TrailingStopExitStrategy(ExitStrategy):
                         exit_type=ExitTriggerType.TRAILING_STOP,
                         close_percentage=1.0,
                         price=current_price,
-                        message=f"触发追踪止损: 最低价={self.lowest_price[symbol]:.4f}, 当前价={current_price:.4f}, 止损线={stop_price:.4f}"
+                        message=f"触发追踪止损: 最低价={self.lowest_price[key]:.4f}, 当前价={current_price:.4f}, 止损线={stop_price:.4f}"
                     )
         
         # 未触发条件
@@ -499,24 +554,79 @@ class LadderExitStrategy(ExitStrategy):
             self.close_pct_per_step = close_pct_per_step
         
         # 跟踪已触发的最高阶梯级别和已平仓的百分比
-        self.max_triggered_level = {}  # symbol -> level 映射
-        self.closed_percentage = {}    # symbol -> percentage 映射
+        # 修改为使用(symbol, position_id)作为key的字典，以支持同一交易对多个仓位
+        self.max_triggered_level = {}  # (symbol, position_id) -> level 映射
+        self.closed_percentage = {}    # (symbol, position_id) -> percentage 映射
         
         self.logger.info(f"阶梯止盈策略参数: 阶梯间隔={self.ladder_step_pct*100:.2f}%, 每阶梯平仓比例={self.close_pct_per_step*100:.2f}%")
     
-    def get_max_triggered_level(self, symbol: str) -> int:
+    def _get_position_key(self, position):
+        """获取仓位的唯一键"""
+        position_id = getattr(position, 'id', None) or getattr(position, 'position_id', str(id(position)))
+        return (position.symbol, position_id)
+    
+    def get_max_triggered_level(self, position: Any) -> int:
         """获取已触发的最高阶梯级别"""
-        return self.max_triggered_level.get(symbol, 0)
+        key = self._get_position_key(position)
+        return self.max_triggered_level.get(key, 0)
     
-    def get_closed_percentage(self, symbol: str) -> float:
+    def get_closed_percentage(self, position: Any) -> float:
         """获取已平仓的百分比"""
-        return self.closed_percentage.get(symbol, 0.0)
+        key = self._get_position_key(position)
+        return self.closed_percentage.get(key, 0.0)
     
-    def update_closed_percentage(self, symbol: str, percentage: float) -> None:
+    def update_closed_percentage(self, symbol: str, percentage: float, position_id: str = None) -> None:
         """更新已平仓百分比"""
-        current_percentage = self.closed_percentage.get(symbol, 0.0)
-        self.closed_percentage[symbol] = current_percentage + percentage
-        self.logger.info(f"{symbol} 更新已平仓百分比: {current_percentage:.2f} -> {self.closed_percentage[symbol]:.2f}")
+        if position_id is None:
+            # 兼容旧接口，尝试查找该symbol的所有key
+            for key in list(self.closed_percentage.keys()):
+                if key[0] == symbol:
+                    current_percentage = self.closed_percentage.get(key, 0.0)
+                    self.closed_percentage[key] = current_percentage + percentage
+                    self.logger.info(f"{symbol} (ID: {key[1]}) 更新已平仓百分比: {current_percentage:.2f} -> {self.closed_percentage[key]:.2f}")
+        else:
+            # 使用指定的position_id
+            key = (symbol, position_id)
+            current_percentage = self.closed_percentage.get(key, 0.0)
+            self.closed_percentage[key] = current_percentage + percentage
+            self.logger.info(f"{symbol} (ID: {position_id}) 更新已平仓百分比: {current_percentage:.2f} -> {self.closed_percentage[key]:.2f}")
+    
+    def init_position_resources(self, position: Any):
+        """初始化仓位相关资源"""
+        key = self._get_position_key(position)
+        symbol = position.symbol
+        
+        # 如果仓位已经有阶梯级别和已平仓比例，使用这些值
+        if hasattr(position, 'ladder_closed_pct'):
+            self.closed_percentage[key] = position.ladder_closed_pct
+        else:
+            self.closed_percentage[key] = 0.0
+        
+        self.max_triggered_level[key] = 0
+        
+        self.logger.info(f"初始化阶梯止盈仓位资源: {symbol} (ID: {key[1]})")
+    
+    def clean_symbol_resources(self, symbol: str, position_id: str = None):
+        """清理与指定交易对相关的资源"""
+        # 如果指定了仓位ID，只清理该仓位的资源
+        if position_id:
+            key = (symbol, position_id)
+            if key in self.max_triggered_level:
+                del self.max_triggered_level[key]
+            if key in self.closed_percentage:
+                del self.closed_percentage[key]
+            self.logger.info(f"清理阶梯止盈资源: {symbol} (ID: {position_id})")
+        else:
+            # 否则清理该交易对的所有资源
+            for key in list(self.max_triggered_level.keys()):
+                if key[0] == symbol:
+                    del self.max_triggered_level[key]
+            
+            for key in list(self.closed_percentage.keys()):
+                if key[0] == symbol:
+                    del self.closed_percentage[key]
+            
+            self.logger.info(f"清理阶梯止盈资源: {symbol} (所有仓位)")
     
     async def check_exit_condition(self, position: Any, current_price: float, **kwargs) -> ExitSignal:
         """
@@ -539,6 +649,9 @@ class LadderExitStrategy(ExitStrategy):
         direction = position.direction
         entry_price = position.entry_price
         leverage = getattr(position, 'leverage', 1)
+        
+        # 获取仓位的唯一键
+        key = self._get_position_key(position)
         
         # 获取阶梯止盈设置
         # 先检查仓位是否有阶梯止盈设置
@@ -566,13 +679,8 @@ class LadderExitStrategy(ExitStrategy):
                              close_percentage=0, price=current_price)
         
         # 初始化最高触发级别和已平仓百分比
-        if symbol not in self.max_triggered_level:
-            # 如果仓位已经有阶梯级别和已平仓比例，使用这些值
-            if hasattr(position, 'ladder_closed_pct'):
-                self.closed_percentage[symbol] = position.ladder_closed_pct
-            else:
-                self.closed_percentage[symbol] = 0.0
-            self.max_triggered_level[symbol] = 0
+        if key not in self.max_triggered_level or key not in self.closed_percentage:
+            self.init_position_resources(position)
         
         # 计算当前盈利百分比 - 使用杠杆后的收益率
         if direction == 'long':
@@ -584,7 +692,7 @@ class LadderExitStrategy(ExitStrategy):
         current_ladder_level = int(current_pnl_pct / ladder_tp_step)
         
         # 如果当前级别高于已触发的最高级别，并且级别大于0
-        if current_ladder_level > self.max_triggered_level.get(symbol, 0) and current_ladder_level > 0:
+        if current_ladder_level > self.max_triggered_level.get(key, 0) and current_ladder_level > 0:
             # 计算本次应平仓的百分比
             total_should_close_pct = current_ladder_level * ladder_tp_pct
             
@@ -592,7 +700,7 @@ class LadderExitStrategy(ExitStrategy):
             total_should_close_pct = min(total_should_close_pct, 1.0)
             
             # 计算本次新增的平仓百分比
-            current_closed_pct = self.closed_percentage.get(symbol, 0.0)
+            current_closed_pct = self.closed_percentage.get(key, 0.0)
             close_pct_this_time = total_should_close_pct - current_closed_pct
             
             # 如果需要平仓的比例为0或负数，说明已经全部平仓，返回未触发
@@ -601,7 +709,7 @@ class LadderExitStrategy(ExitStrategy):
                                  close_percentage=0, price=current_price)
             
             # 更新最高触发级别和已平仓百分比
-            self.max_triggered_level[symbol] = current_ladder_level
+            self.max_triggered_level[key] = current_ladder_level
             
             # 记录仓位的最新阶梯级别和已平仓比例
             if self.position_mgr:
@@ -617,7 +725,8 @@ class LadderExitStrategy(ExitStrategy):
                 params={
                     "ladder_level": current_ladder_level,
                     "total_closed_pct": total_should_close_pct,
-                    "symbol": symbol
+                    "symbol": symbol,
+                    "position_id": key[1]  # 添加position_id到参数中
                 }
             )
         
@@ -916,6 +1025,378 @@ class TimeBasedExitStrategy(ExitStrategy):
             trader=trader
         )
 
+class ATRBasedExitStrategy(ExitStrategy):
+    """基于ATR的动态止损策略"""
+    
+    def __init__(self, app_name: str, atr_period: int = 14, atr_timeframe: str = "15m", 
+                 atr_multiplier: float = 2.5, min_stop_loss_pct: float = 0.02,
+                 priority: int = 5, name: str = "ATR动态止损", position_mgr=None, 
+                 strategy_config=None, data_cache=None, trader=None):
+        """
+        初始化基于ATR的动态止损策略
+        
+        Args:
+            app_name: 应用名称，用于日志记录
+            atr_period: 计算ATR的周期，默认14
+            atr_timeframe: 计算ATR的时间周期，默认15m
+            atr_multiplier: ATR乘数，确定止损距离为ATR的多少倍，默认2.5倍
+            min_stop_loss_pct: 最小止损百分比(已废弃，保留参数仅为向后兼容)
+            priority: 优先级，数值越小优先级越高
+            name: 策略名称
+            position_mgr: 仓位管理器
+            strategy_config: 策略配置
+            data_cache: 数据缓存对象
+            trader: 交易执行器
+        """
+        super().__init__(app_name, name, priority, position_mgr, strategy_config, data_cache, trader)
+        
+        # 从策略配置中读取ATR参数
+        if strategy_config and 'strategy' in strategy_config:
+            atr_config = strategy_config['strategy']
+            self.atr_period = atr_config.get('period', atr_period)
+            self.atr_timeframe = atr_config.get('timeframe', atr_timeframe)
+            self.atr_multiplier = atr_config.get('multiplier', atr_multiplier)
+            # 保留参数但不使用
+            self.min_stop_loss_pct = atr_config.get('min_stop_loss_pct', min_stop_loss_pct)
+        else:
+            self.atr_period = atr_period
+            self.atr_timeframe = atr_timeframe
+            self.atr_multiplier = atr_multiplier
+            # 保留参数但不使用
+            self.min_stop_loss_pct = min_stop_loss_pct
+
+        # 最高价和最低价，初始为0和无穷大
+        # 修改为使用(symbol, position_id)作为key的字典，以支持同一交易对多个仓位
+        self.highest_price = {}  # (symbol, position_id) -> highest_price 映射
+        self.lowest_price = {}   # (symbol, position_id) -> lowest_price 映射
+            
+        # 缓存每个交易对的ATR值和最近更新时间
+        self.atr_values = {}  # symbol -> {"value": atr_value, "time": last_update_time}
+        self.atr_cache_duration = 300  # 缓存有效期(秒)，默认5分钟更新一次
+        
+        self.logger.info(f"ATR动态止损参数: 周期={self.atr_period}, 时间框架={self.atr_timeframe}, " +
+                        f"乘数={self.atr_multiplier}")
+    
+    def _get_position_key(self, position):
+        """获取仓位的唯一键"""
+        position_id = getattr(position, 'id', None) or getattr(position, 'position_id', str(id(position)))
+        return (position.symbol, position_id)
+    
+    def init_position_resources(self, position: Any):
+        """初始化仓位相关资源"""
+        key = self._get_position_key(position)
+        symbol = position.symbol
+        entry_price = position.entry_price
+        
+        # 使用position的high_price和low_price，如果有的话
+        if hasattr(position, 'high_price') and position.high_price:
+            self.highest_price[key] = position.high_price
+        else:
+            self.highest_price[key] = entry_price
+            
+        if hasattr(position, 'low_price') and position.low_price and position.low_price != float('inf'):
+            self.lowest_price[key] = position.low_price
+        else:
+            self.lowest_price[key] = entry_price
+            
+        self.logger.info(f"初始化ATR止损仓位资源: {symbol} (ID: {key[1]}), 入场价: {entry_price}")
+    
+    def clean_symbol_resources(self, symbol: str, position_id: str = None):
+        """清理与指定交易对相关的资源"""
+        # 如果指定了仓位ID，只清理该仓位的资源
+        if position_id:
+            key = (symbol, position_id)
+            if key in self.highest_price:
+                del self.highest_price[key]
+            if key in self.lowest_price:
+                del self.lowest_price[key]
+            self.logger.info(f"清理ATR止损资源: {symbol} (ID: {position_id})")
+        else:
+            # 否则清理该交易对的所有资源
+            for key in list(self.highest_price.keys()):
+                if key[0] == symbol:
+                    del self.highest_price[key]
+            
+            for key in list(self.lowest_price.keys()):
+                if key[0] == symbol:
+                    del self.lowest_price[key]
+            
+            self.logger.info(f"清理ATR止损资源: {symbol} (所有仓位)")
+            
+            # ATR值缓存也可以清理，这是按symbol缓存的
+            if symbol in self.atr_values:
+                del self.atr_values[symbol]
+                self.logger.info(f"清理ATR缓存: {symbol}")
+    
+    async def get_atr_value(self, symbol: str) -> float:
+        """
+        获取指定交易对的ATR值，如果缓存中有且未过期则使用缓存
+        
+        Args:
+            symbol: 交易对
+            
+        Returns:
+            float: ATR值，如果无法计算返回None
+        """
+        current_time = time.time()
+        
+        # 检查缓存
+        if symbol in self.atr_values:
+            cache_data = self.atr_values[symbol]
+            # 如果缓存未过期，直接返回
+            if current_time - cache_data["time"] < self.atr_cache_duration:
+                self.logger.debug(f"{symbol} ATR缓存命中: {cache_data['value']:.6f}, 缓存时间: {int(current_time - cache_data['time'])}秒前")
+                return cache_data["value"]
+            else:
+                self.logger.debug(f"{symbol} ATR缓存过期, 缓存时间: {int(current_time - cache_data['time'])}秒前")
+        
+        # 计算新的ATR值
+        self.logger.info(f"{symbol} 计算新的ATR值...")
+        atr_value = await self.calculate_atr(symbol)
+        
+        if atr_value is not None:
+            # 更新缓存
+            self.atr_values[symbol] = {"value": atr_value, "time": current_time}
+            self.logger.info(f"{symbol} ATR计算结果: {atr_value:.6f}, 周期:{self.atr_period}, 时间框架:{self.atr_timeframe}")
+        else:
+            self.logger.warning(f"{symbol} 无法计算ATR值")
+            
+        return atr_value
+    
+    async def calculate_atr(self, symbol: str) -> Optional[float]:
+        """
+        计算指定交易对的ATR值
+        
+        Args:
+            symbol: 交易对
+            
+        Returns:
+            float: ATR值，如果无法计算返回None
+        """
+        try:
+            # 获取K线数据
+            self.logger.debug(f"{symbol} 获取K线数据: 周期={self.atr_timeframe}, 数量={self.atr_period + 1}")
+            candles = await self._get_candle_data(symbol, self.atr_timeframe, self.atr_period + 1)
+            if not candles or len(candles) < self.atr_period + 1:
+                self.logger.warning(f"{symbol} K线数据不足，获取到 {len(candles) if candles else 0} 根K线, 需要 {self.atr_period + 1} 根")
+                return None
+            
+            self.logger.debug(f"{symbol} 成功获取 {len(candles)} 根K线数据")
+
+            # 将K线数据转换为DataFrame
+            df = pd.DataFrame(candles, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'volccy', 'volccyquote', 'confirm'])
+            df['high'] = df['high'].astype(float)
+            df['low'] = df['low'].astype(float)
+            df['close'] = df['close'].astype(float)
+
+            # 计算真实波动幅度（TR）
+            df['previous_close'] = df['close'].shift(1)
+            df['tr1'] = df['high'] - df['low']
+            df['tr2'] = abs(df['high'] - df['previous_close'])
+            df['tr3'] = abs(df['low'] - df['previous_close'])
+            df['true_range'] = df[['tr1', 'tr2', 'tr3']].max(axis=1)
+
+            # 计算ATR（使用EMA）
+            df['atr'] = df['true_range'].ewm(span=self.atr_period, adjust=False).mean()
+
+            atr_value = df['atr'].iloc[-1]
+
+            self.logger.info(f"{symbol} ATR计算完成: {atr_value:.6f}")
+            return atr_value
+            
+        except Exception as e:
+            self.logger.error(f"计算ATR异常: {e}", exc_info=True)
+            return None
+    
+    async def _get_candle_data(self, symbol: str, timeframe: str, count: int) -> List:
+        """
+        获取K线数据
+        
+        Args:
+            symbol: 交易对
+            timeframe: K线周期
+            count: 需要的K线数量
+            
+        Returns:
+            List: K线数据
+        """
+        try:
+            # 尝试从trader获取K线数据
+            if self.trader:
+                candles = self.trader.get_kline_data(
+                    inst_id=symbol,
+                    bar=timeframe,
+                    limit=count
+                )
+                
+                # 根据返回数据类型处理
+                if isinstance(candles, dict) and 'data' in candles:
+                    return candles['data']
+                elif isinstance(candles, list):
+                    return candles
+                else:
+                    self.logger.warning(f"获取 {symbol} 的K线数据格式不识别: {candles}")
+                    return []
+            
+            # 如果data_cache支持获取K线数据，也可以使用它
+            elif self.data_cache and hasattr(self.data_cache, 'get_candle_data'):
+                return await self.data_cache.get_candle_data(
+                    symbol=symbol,
+                    bar_type=timeframe,
+                    count=count
+                )
+            
+            # 没有可用方法获取K线数据
+            else:
+                self.logger.error(f"无法获取K线数据: 没有可用的trader或data_cache")
+                return []
+                
+        except Exception as e:
+            self.logger.error(f"获取 {symbol} 的K线数据异常: {e}", exc_info=True)
+            return []
+    
+    async def check_exit_condition(self, position: Any, current_price: float, **kwargs) -> ExitSignal:
+        """
+        检查是否满足ATR止损条件
+        
+        Args:
+            position: 仓位对象
+            current_price: 当前价格
+            kwargs: 额外参数
+            
+        Returns:
+            ExitSignal: 平仓信号
+        """
+        if not self.enabled:
+            return ExitSignal(triggered=False, exit_type=ExitTriggerType.CUSTOM, 
+                             close_percentage=0, price=current_price)
+        
+        # 获取仓位信息
+        symbol = position.symbol
+        direction = position.direction
+        entry_price = position.entry_price
+        leverage = getattr(position, 'leverage', 1)
+        position_time = getattr(position, 'timestamp', 0)
+        
+        # 获取仓位的唯一键
+        key = self._get_position_key(position)
+        
+        # 获取信号中的定制参数
+        signal = getattr(position, 'signal', None)
+        custom_multiplier = None
+        
+        if signal and hasattr(signal, 'extra_data') and signal.extra_data:
+            custom_multiplier = signal.extra_data.get('atr_multiplier')
+        
+        # 使用信号中的参数，如果有的话
+        atr_multiplier = custom_multiplier if custom_multiplier is not None else self.atr_multiplier
+        
+        # 记录使用的参数
+        self.logger.info(f"{symbol} ATR止损验证 - 仓位信息: 方向={direction}, 入场价={entry_price:.6f}, 当前价={current_price:.6f}, "
+                         f"杠杆={leverage}, 开仓时间={position_time}, ATR乘数={atr_multiplier}")
+        
+        # 获取ATR值
+        self.logger.info(f"{symbol} ATR止损验证 - 开始获取ATR值")
+        atr_value = await self.get_atr_value(symbol)
+        if atr_value is None:
+            self.logger.warning(f"{symbol} 无法获取ATR值，跳过ATR止损检查")
+            return ExitSignal(triggered=False, exit_type=ExitTriggerType.CUSTOM, 
+                             close_percentage=0, price=current_price)
+        
+        # 计算基于ATR的止损距离（以价格单位表示，不再除以入场价格）
+        atr_stop_price_distance = atr_value * atr_multiplier
+        self.logger.info(f"{symbol} ATR止损验证 - 计算结果: ATR={atr_value:.6f}, 乘数={atr_multiplier}")
+        self.logger.info(f"{symbol} ATR止损验证 - 止损价格距离: {atr_value:.6f} * {atr_multiplier} = {atr_stop_price_distance:.6f}")
+
+        # 初始化最高/最低价
+        if key not in self.highest_price or key not in self.lowest_price:
+            self.init_position_resources(position)
+        
+        # 计算止损价格
+        if direction == "long":
+            # 更新最高价
+            if current_price > self.highest_price[key]:
+                self.highest_price[key] = current_price
+            stop_price = self.highest_price[key] - atr_stop_price_distance
+            stop_distance_percent = (current_price - stop_price) / current_price * 100
+            self.logger.info(f"{symbol} (ID: {key[1]}) ATR止损验证 - 多头止损价格: {self.highest_price[key]:.6f} - {atr_stop_price_distance:.6f} = {stop_price:.6f} (距离: {stop_distance_percent:.4f}%)")
+            
+            # 检查是否触发止损
+            if current_price <= stop_price:
+                self.logger.info(f"{symbol} (ID: {key[1]}) 触发ATR止损: 入场价={entry_price:.6f}, " +
+                               f"当前价={current_price:.6f}, 止损线={stop_price:.6f}, " +
+                               f"ATR={atr_value:.6f}, 止损距离={atr_stop_price_distance:.6f}")
+                           
+                return ExitSignal(
+                    triggered=True,
+                    exit_type=ExitTriggerType.ATR_BASED,
+                    close_percentage=1.0,
+                    price=current_price,
+                    message=f"触发ATR止损: ATR={atr_value:.6f}, 止损线={stop_price:.6f}"
+                )
+            else:
+                self.logger.info(f"{symbol} (ID: {key[1]}) 未触发ATR止损: 当前价 {current_price:.6f} > 止损价 {stop_price:.6f}, 差距: {(current_price - stop_price):.6f}")
+        else:  # short
+            # 更新最低价
+            if current_price < self.lowest_price[key]:
+                self.lowest_price[key] = current_price
+            stop_price = self.lowest_price[key] + atr_stop_price_distance
+            stop_distance_percent = (stop_price - current_price) / current_price * 100
+            self.logger.info(f"{symbol} (ID: {key[1]}) ATR止损验证 - 空头止损价格: {self.lowest_price[key]:.6f} + {atr_stop_price_distance:.6f} = {stop_price:.6f} (距离: {stop_distance_percent:.4f}%)")
+            
+            # 检查是否触发止损
+            if current_price >= stop_price:
+                self.logger.info(f"{symbol} (ID: {key[1]}) 触发ATR止损: 入场价={entry_price:.6f}, " +
+                               f"当前价={current_price:.6f}, 止损线={stop_price:.6f}, " +
+                               f"ATR={atr_value:.6f}, 止损距离={atr_stop_price_distance:.6f}")
+                           
+                return ExitSignal(
+                    triggered=True,
+                    exit_type=ExitTriggerType.ATR_BASED,
+                    close_percentage=1.0,
+                    price=current_price,
+                    message=f"触发ATR止损: ATR={atr_value:.6f}, 止损线={stop_price:.6f}"
+                )
+            else:
+                self.logger.info(f"{symbol} (ID: {key[1]}) 未触发ATR止损: 当前价 {current_price:.6f} < 止损价 {stop_price:.6f}, 差距: {(stop_price - current_price):.6f}")
+        
+        # 未触发条件
+        return ExitSignal(
+            triggered=False,
+            exit_type=ExitTriggerType.CUSTOM,
+            close_percentage=0,
+            price=current_price
+        )
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """将策略转换为字典，用于序列化"""
+        data = super().to_dict()
+        data.update({
+            "atr_period": self.atr_period,
+            "atr_timeframe": self.atr_timeframe,
+            "atr_multiplier": self.atr_multiplier,
+            "min_stop_loss_pct": self.min_stop_loss_pct
+        })
+        return data
+    
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any], app_name: str, position_mgr=None, 
+                 strategy_config=None, data_cache=None, trader=None) -> 'ATRBasedExitStrategy':
+        """从字典创建策略对象"""
+        return cls(
+            app_name=app_name,
+            atr_period=data.get("atr_period", 14),
+            atr_timeframe=data.get("atr_timeframe", "15m"),
+            atr_multiplier=data.get("atr_multiplier", 2.5),
+            min_stop_loss_pct=data.get("min_stop_loss_pct", 0.02),
+            priority=data.get("priority", 5),
+            name=data.get("name", "ATR动态止损"),
+            position_mgr=position_mgr,
+            strategy_config=strategy_config,
+            data_cache=data_cache,
+            trader=trader
+        )
+
 class ExitStrategyManager:
     """平仓策略管理器"""
     
@@ -971,6 +1452,21 @@ class ExitStrategyManager:
         )
         self.add_strategy(fixed_strategy)
         
+        # ATR动态止损策略
+        atr_config = None
+        if 'atr_stop_loss' in exit_strategies_config:
+            atr_config = {'strategy': exit_strategies_config['atr_stop_loss']}
+            self.logger.info(f"ATR动态止损策略配置: {atr_config}")
+        
+        atr_strategy = ATRBasedExitStrategy(
+            app_name=self.app_name,
+            position_mgr=self.position_mgr,
+            strategy_config=atr_config,
+            data_cache=self.data_cache,
+            trader=self.trader
+        )
+        self.add_strategy(atr_strategy)
+        
         # 追踪止损策略
         trailing_config = None
         if 'trailing_stop_exit' in exit_strategies_config:
@@ -1023,6 +1519,7 @@ class ExitStrategyManager:
             # 创建策略类型到启用标志的映射
             strategy_type_map = {
                 'fixed_percent': FixedPercentExitStrategy,
+                'atr_stop_loss': ATRBasedExitStrategy,
                 'trailing_stop': TrailingStopExitStrategy,
                 'ladder_exit': LadderExitStrategy,
                 'time_based_exit': TimeBasedExitStrategy
@@ -1045,6 +1542,8 @@ class ExitStrategyManager:
             config_key = None
             if isinstance(strategy, FixedPercentExitStrategy):
                 config_key = 'fixed_percent_exit'
+            elif isinstance(strategy, ATRBasedExitStrategy):
+                config_key = 'atr_stop_loss'
             elif isinstance(strategy, TrailingStopExitStrategy):
                 config_key = 'trailing_stop_exit'
             elif isinstance(strategy, LadderExitStrategy):
@@ -1068,12 +1567,25 @@ class ExitStrategyManager:
             # 打印策略参数
             if isinstance(strategy, FixedPercentExitStrategy):
                 self.logger.info(f"  - 止盈: {strategy.take_profit_pct*100:.2f}%, 止损: {strategy.stop_loss_pct*100:.2f}%")
+            elif isinstance(strategy, ATRBasedExitStrategy):
+                self.logger.info(f"  - ATR周期: {strategy.atr_period}, 时间框架: {strategy.atr_timeframe}, " +
+                               f"乘数: {strategy.atr_multiplier}, 最小止损: {strategy.min_stop_loss_pct*100:.2f}%")
             elif isinstance(strategy, TrailingStopExitStrategy):
                 self.logger.info(f"  - 追踪距离: {strategy.trailing_distance*100:.2f}%, 激活阈值: {strategy.activation_pct*100:.2f}%")
             elif isinstance(strategy, LadderExitStrategy):
                 self.logger.info(f"  - 阶梯间隔: {strategy.ladder_step_pct*100:.2f}%, 每阶梯平仓比例: {strategy.close_pct_per_step*100:.2f}%")
             elif isinstance(strategy, TimeBasedExitStrategy):
                 self.logger.info(f"  - K线周期: {strategy.candle_timeframe}, K线数量: {strategy.candle_count}")
+        
+        # 初始化已有仓位的资源
+        if self.position_mgr:
+            positions = self.position_mgr.load_positions(dict_format=True)
+            for symbol, position in positions.items():
+                if not position.closed:
+                    self.logger.info(f"初始化退出策略管理器中 {symbol} 仓位的资源")
+                    for strategy in self.strategies.values():
+                        if hasattr(strategy, 'init_position_resources'):
+                            strategy.init_position_resources(position)
     
     def add_strategy(self, strategy: ExitStrategy) -> None:
         """
@@ -1179,6 +1691,11 @@ class ExitStrategyManager:
         """
         if not self.strategies:
             return False
+        
+        # 首先初始化所有策略的仓位资源
+        for strategy in self.strategies.values():
+            if hasattr(strategy, 'init_position_resources'):
+                strategy.init_position_resources(position)
             
         # 按优先级排序策略
         sorted_strategies = sorted(self.strategies.values(), key=lambda s: s.priority)

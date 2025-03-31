@@ -831,35 +831,68 @@ class BaseStrategy(ABC):
             else:
                 self.logger.info(f"执行全部平仓 {symbol}")
             
-            # 计算平仓数量
-            close_quantity = abs(position.quantity) * close_percentage
+            # 获取当前价格
+            current_price = await self.data_cache.get_mark_price(symbol)
+            if not current_price:
+                self.logger.warning(f"无法获取 {symbol} 的现价，使用仓位入场价")
+                current_price = position.entry_price
             
-            # 使用trader的calculate_position_size方法圆整数量
+            # 从API获取最新的可平仓数量
             try:
-                # 计算对应的USDT价值
-                current_price = await self.data_cache.get_mark_price(symbol)
-                if not current_price:
-                    self.logger.warning(f"无法获取 {symbol} 的现价，使用仓位入场价")
-                    current_price = position.entry_price
-                
-                contract_size = self.get_contract_size_sync(symbol)
-                usdt_value = close_quantity * current_price * contract_size / position.leverage
-                
-                # 使用calculate_position_size圆整
-                close_quantity = self.trader.calculate_position_size(
-                    inst_id=symbol,
-                    is_spot=False,  # 永续合约
-                    target_usdt=usdt_value,
-                    target_leverage=position.leverage
-                )
-                
-                self.logger.info(f"{symbol} 平仓数量 (已圆整): {close_quantity}")
+                pos_data = await self.data_cache.get_position_data(symbol, force_update=True)
+                if pos_data and pos_data.get('data'):
+                    api_position = pos_data.get('data')
+                    if 'availPos' in api_position and api_position['availPos']:
+                        avail_pos = float(api_position['availPos'])
+                        if avail_pos > 0:  # 确保可平仓数量大于0
+                            # 记录检测到的差异
+                            if abs(avail_pos - abs(position.quantity)) > 0.01:
+                                self.logger.warning(f"{symbol} API可平仓数量与本地记录不一致: API={avail_pos}, 本地={abs(position.quantity)}")
+                            
+                            # 使用API返回的可平仓数量
+                            self.logger.info(f"{symbol} 使用API返回的可平仓数量: {avail_pos}")
+                            close_quantity = avail_pos * close_percentage
+                        else:
+                            # 如果API返回的可平仓数量为0，使用本地记录
+                            self.logger.warning(f"{symbol} API返回的可平仓数量为0，使用本地记录: {abs(position.quantity)}")
+                            close_quantity = abs(position.quantity) * close_percentage
+                    else:
+                        # 如果API没有返回可平仓数量，使用本地记录
+                        self.logger.warning(f"{symbol} API未返回可平仓数量，使用本地记录: {abs(position.quantity)}")
+                        close_quantity = abs(position.quantity) * close_percentage
+                else:
+                    # 如果无法获取API数据，使用本地记录
+                    self.logger.warning(f"{symbol} 无法获取API持仓数据，使用本地记录: {abs(position.quantity)}")
+                    close_quantity = abs(position.quantity) * close_percentage
             except Exception as e:
-                self.logger.warning(f"使用calculate_position_size圆整数量失败，使用原始数量: {e}")
+                # 发生异常，使用本地记录
+                self.logger.error(f"{symbol} 获取API持仓数据异常: {e}，使用本地记录: {abs(position.quantity)}")
+                close_quantity = abs(position.quantity) * close_percentage
             
             # 确定平仓方向（与持仓方向相反）
             side = "sell" if position.direction == "long" else "buy"
             pos_side = position.direction
+            
+            # 获取合约信息，用于圆整数量
+            try:
+                contract_info = self.trader.get_contract_info(symbol, False)["data"][0]
+                
+                # 获取最小交易单位
+                lot_size = float(contract_info['lotSz']) if 'lotSz' in contract_info else 1
+                
+                # 计算精度
+                if '.' in str(contract_info.get('lotSz', '1')):
+                    precision = str(contract_info['lotSz']).split('.')[1].find('1') + 1
+                else:
+                    precision = 0
+                
+                # 圆整平仓数量
+                close_quantity = round(close_quantity / lot_size) * lot_size
+                close_quantity = round(close_quantity, precision)
+                
+                self.logger.info(f"{symbol} 圆整平仓数量: 原始={abs(position.quantity)}, 可平={close_quantity}")
+            except Exception as e:
+                self.logger.warning(f"获取合约信息圆整数量失败，使用原始数量: {e}")
             
             # 执行平仓操作
             close_result = self.trader.swap_order(
@@ -886,19 +919,16 @@ class BaseStrategy(ABC):
                         # 计算对应的USDT价值
                         remaining_usdt_value = abs(new_quantity) * current_price * contract_size / position.leverage
                         
-                        # 使用calculate_position_size圆整剩余数量
-                        rounded_new_quantity = self.trader.calculate_position_size(
-                            inst_id=symbol,
-                            is_spot=False,
-                            target_usdt=remaining_usdt_value,
-                            target_leverage=position.leverage
-                        )
+                        # 使用圆整方法处理剩余数量
+                        remaining_quantity = abs(new_quantity)
+                        remaining_quantity = round(remaining_quantity / lot_size) * lot_size
+                        remaining_quantity = round(remaining_quantity, precision)
                         
                         # 保持方向一致
                         if position.direction == "long":
-                            new_quantity = rounded_new_quantity
+                            new_quantity = remaining_quantity
                         else:  # short
-                            new_quantity = -rounded_new_quantity
+                            new_quantity = -remaining_quantity
                         
                     except Exception as e:
                         self.logger.warning(f"圆整更新后的持仓数量失败，使用原始计算结果: {e}")
@@ -908,16 +938,11 @@ class BaseStrategy(ABC):
                     contract_size = self.get_contract_size_sync(symbol)
                     closed_contract_value = close_quantity * position.entry_price * contract_size
                     
-                    # 获取当前价格
-                    mark_price = await self.data_cache.get_mark_price(symbol)
-                    if not mark_price:
-                        mark_price = position.entry_price  # 如果无法获取当前价格，使用入场价格
-                    
                     # 计算杠杆收益率
                     if position.direction == 'long':
-                        pnl_pct = (mark_price - position.entry_price) / position.entry_price
+                        pnl_pct = (current_price - position.entry_price) / position.entry_price
                     else:  # short
-                        pnl_pct = (position.entry_price - mark_price) / position.entry_price
+                        pnl_pct = (position.entry_price - current_price) / position.entry_price
                     
                     # 带杠杆的收益率
                     leveraged_pnl_pct = pnl_pct * position.leverage
@@ -954,7 +979,23 @@ class BaseStrategy(ABC):
                         self.logger.info(f"{symbol} 持仓已全部平仓")
                         position.closed = 1
                         position.close_time = int(time.time() * 1000)
-                        self.position_mgr.save_position(position)
+                        position.exit_timestamp = position.close_time  # 确保exit_timestamp也被设置
+                        self.position_mgr.close_position(
+                            symbol=symbol,
+                            exit_price=current_price,
+                            exit_timestamp=position.close_time,
+                            pnl_amount=closed_pnl,
+                            pnl_percentage=leveraged_pnl_pct,
+                            position_id=position.position_id
+                        )
+                        
+                        # 清理退出策略管理器中与该仓位相关的资源
+                        position_id = position.position_id
+                        for strategy in self.exit_strategy_manager.strategies.values():
+                            if hasattr(strategy, 'clean_symbol_resources'):
+                                strategy.clean_symbol_resources(symbol, position_id)
+                                self.logger.debug(f"已清理退出策略管理器中的仓位资源: {symbol}, position_id: {position_id}")
+                        
                         # 通知风控系统完全平仓 (确保计数器正确更新)
                         if hasattr(self.position_mgr, 'risk_controller'):
                             self.position_mgr.risk_controller.record_close_position(symbol, is_partial_close=False)
@@ -973,10 +1014,10 @@ class BaseStrategy(ABC):
                             position.realized_pnl = realized_pnl
                             self.logger.info(f"{symbol} 部分平仓 更新仓位信息: {position}")
 
-                    # 更新持仓数据库
-                    self.position_mgr.save_position(position)
-                    
-                    return True, f"部分平仓成功，平仓比例: {close_percentage*100:.1f}%"
+                        # 更新持仓数据库
+                        self.position_mgr.save_position(position)
+                        
+                        return True, f"部分平仓成功，平仓比例: {close_percentage*100:.1f}%"
                 else:
                     # 全部平仓的逻辑
                     position.closed = 1
@@ -992,37 +1033,84 @@ class BaseStrategy(ABC):
                             
                             # 获取平仓价格和已实现盈亏
                             exit_price = float(api_position.get('markPx', 0))
+                            if exit_price == 0:
+                                exit_price = current_price  # 如果API未返回平仓价格，使用当前价格
+                                
                             position.exit_price = exit_price
                             position.close_price = exit_price  # 同时设置close_price和exit_price
                             position.realized_pnl = float(api_position.get('realizedPnl', 0)) + float(api_position.get('fee', 0))
                         else:
                             # 如果无法从API获取，则使用当前市场价格
-                            mark_price = await self.data_cache.get_mark_price(symbol)
-                            if mark_price:
-                                position.exit_price = mark_price
-                                position.close_price = mark_price
+                            position.exit_price = current_price
+                            position.close_price = current_price
+                            
+                            # 计算收益信息
+                            if position.direction == "long":
+                                pnl_pct = (current_price - position.entry_price) / position.entry_price
+                            else:  # short
+                                pnl_pct = (position.entry_price - current_price) / position.entry_price
+                                
+                            # 计算带杠杆的盈亏百分比
+                            leveraged_pnl_pct = pnl_pct * position.leverage
+                            
+                            # 获取合约面值
+                            contract_size = self.get_contract_size_sync(symbol)
+                            
+                            # 计算盈亏金额
+                            # 合约价值 = 数量 * 入场价格 * 合约面值
+                            contract_value = abs(position.quantity) * position.entry_price * contract_size
+                            
+                            # 保证金 = 合约价值 / 杠杆倍数
+                            margin = contract_value / position.leverage
+                            
+                            # 实际盈亏金额（考虑杠杆）
+                            position.realized_pnl = margin * leveraged_pnl_pct
                     except Exception as e:
                         self.logger.error(f"获取平仓信息异常: {e}")
+                        position.exit_price = current_price
+                        position.close_price = current_price
+                    
+                    # 注意：此处我们启动任务，不等待其完成，这样可以更快地返回平仓结果
+                    self._start_position_update_task(position.pos_id, symbol)
+                    
+                    # 更新数据库和风控
+                    try:
+                        # 传递position_id，确保关闭正确的仓位
+                        self.position_mgr.close_position(
+                            symbol=symbol,
+                            exit_price=position.exit_price,
+                            exit_timestamp=position.exit_timestamp,
+                            pnl_amount=position.realized_pnl,
+                            pnl_percentage=position.realized_pnl / (position.margin if position.margin else 1),
+                            position_id=position.position_id
+                        )
+                        self.logger.info(f"仓位已在数据库中标记为已平仓: {symbol}, position_id: {position.position_id}")
+                        
+                        # 清理退出策略管理器中与该仓位相关的资源
+                        position_id = position.position_id
+                        for strategy in self.exit_strategy_manager.strategies.values():
+                            if hasattr(strategy, 'clean_symbol_resources'):
+                                strategy.clean_symbol_resources(symbol, position_id)
+                                self.logger.debug(f"已清理退出策略管理器中的仓位资源: {symbol}, position_id: {position_id}")
+                        
+                        # 通知风控系统平仓信息
+                        if hasattr(self.position_mgr, 'risk_controller'):
+                            self.position_mgr.risk_controller.record_close_position(symbol, is_partial_close=False)
+                            self.logger.debug(f"已通知风控系统全部平仓: {symbol}")
+                    except Exception as e:
+                        self.logger.error(f"更新数据库或风控系统状态异常: {e}", exc_info=True)
                     
                     # 保存更新后的仓位信息
                     self.position_mgr.save_position(position)
                     
-                    # 通知风控系统平仓信息
-                    if hasattr(self.position_mgr, 'risk_controller'):
-                        self.position_mgr.risk_controller.record_close_position(symbol, is_partial_close=False)
-                        self.logger.debug(f"已通知风控系统全部平仓: {symbol}")
-                    
-                    # 更新平仓数据
-                    self._start_position_update_task(position.pos_id, symbol)
-                    
-                    return True, "平仓成功"
+                    return True, f"平仓成功: {symbol} @ {position.exit_price}, PnL: {position.realized_pnl:.2f} USDT"
             else:
                 error_msg = close_result.get('msg', '未知错误') if close_result else '无响应'
                 self.logger.error(f"{symbol} 平仓失败: {error_msg}")
                 return False, f"平仓失败: {error_msg}"
         
         except Exception as e:
-            self.logger.error(f"{symbol} 执行平仓操作异常: {e}")
+            self.logger.error(f"{symbol} 执行平仓操作异常: {e}", exc_info=True)
             return False, f"平仓异常: {e}"
     
     def _start_position_update_task(self, pos_id: str, symbol: str):
