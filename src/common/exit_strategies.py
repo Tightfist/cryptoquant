@@ -1964,7 +1964,7 @@ class ExitStrategyManager:
                         
                     self.logger.info(f"初始化退出策略管理器中 {symbol} 仓位的资源 (ID: {position.position_id}), 入场价: {position.entry_price}")
                     for strategy in self.strategies.values():
-                        if hasattr(strategy, 'init_position_resources'):
+                        if hasattr(strategy, 'init_position_resources') and strategy.enabled:
                             strategy.init_position_resources(position)
             except Exception as e:
                 self.logger.error(f"初始化已有仓位资源异常: {e}", exc_info=True)
