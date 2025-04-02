@@ -14,6 +14,11 @@ import asyncio
 import numpy as np
 import pandas as pd
 from typing import Optional
+import math
+from datetime import datetime, timedelta
+
+# 添加对order_utils的导入，获取价格精度函数
+from src.common.order_utils import get_price_precision
 
 # 平仓触发类型枚举
 class ExitTriggerType(str, Enum):
@@ -35,6 +40,7 @@ class ExitSignal:
     price: float                 # 触发价格
     message: str = ""            # 描述信息
     params: Dict[str, Any] = field(default_factory=dict)  # 额外参数
+    need_cleanup: bool = False   # 是否需要执行完整的资源清理流程
 
 class ExitStrategy(ABC):
     """平仓策略基类"""
@@ -228,6 +234,17 @@ class FixedPercentExitStrategy(ExitStrategy):
         direction = position.direction
         entry_price = position.entry_price
         leverage = getattr(position, 'leverage', 1)
+        symbol = position.symbol
+        
+        # 从交易所获取价格精度
+        precision = 4  # 默认精度
+        if self.trader:
+            # 确定是否为现货或合约
+            is_spot = not ("-SWAP" in symbol or "-FUTURES" in symbol or "-PERPETUAL" in symbol)
+            try:
+                precision = get_price_precision(self.trader, symbol, is_spot)
+            except Exception as e:
+                self.logger.warning(f"获取价格精度失败，使用默认值: {e}")
         
         # 获取止盈止损设置 - 可能来自仓位或信号
         signal = getattr(position, 'signal', None)
@@ -239,47 +256,63 @@ class FixedPercentExitStrategy(ExitStrategy):
             take_profit_pct = take_profit_pct / leverage
             stop_loss_pct = stop_loss_pct / leverage
         
-        # 添加日志
-        self.logger.debug(f"检查 {position.symbol} 固定止盈止损条件: 入场价={entry_price}, 当前价={current_price}, "
-                         f"止盈比例={take_profit_pct*100:.2f}%, 价格={entry_price * (1 + take_profit_pct)}; 止损比例={stop_loss_pct*100:.2f}%, 价格={entry_price * (1 - stop_loss_pct)}")
+        # 计算当前的盈亏百分比
+        pnl_pct = 0.0
+        if direction == "long":
+            pnl_pct = (current_price - entry_price) / entry_price
+            target_tp_price = entry_price * (1 + take_profit_pct)
+            target_sl_price = entry_price * (1 - stop_loss_pct)
+        else:  # short
+            pnl_pct = (entry_price - current_price) / entry_price
+            target_tp_price = entry_price * (1 - take_profit_pct)
+            target_sl_price = entry_price * (1 + stop_loss_pct)
+        
+        # 使用动态精度格式化价格
+        tp_price_formatted = f"{{:.{precision}f}}".format(target_tp_price)
+        sl_price_formatted = f"{{:.{precision}f}}".format(target_sl_price)
+        
+        # 添加更详细的日志
+        self.logger.debug(f"检查 {position.symbol} {direction}仓位固定止盈止损条件: 入场价={entry_price}, 当前价={current_price}, "
+                         f"当前盈亏={pnl_pct*100:.2f}%, 止盈比例={take_profit_pct*100:.2f}%, 价格={tp_price_formatted}; "
+                         f"止损比例={stop_loss_pct*100:.2f}%, 价格={sl_price_formatted}")
         
         if direction == "long":
             # 多头止盈
-            if current_price >= entry_price * (1 + take_profit_pct):
+            if current_price >= target_tp_price:
                 return ExitSignal(
                     triggered=True,
                     exit_type=ExitTriggerType.TAKE_PROFIT,
                     close_percentage=1.0,
                     price=current_price,
-                    message=f"触发固定止盈: {current_price} >= {entry_price * (1 + take_profit_pct):.4f}"
+                    message=f"触发多头固定止盈: {current_price} >= {tp_price_formatted}, 盈利: {pnl_pct*100:.2f}%"
                 )
             # 多头止损
-            elif current_price <= entry_price * (1 - stop_loss_pct):
+            elif current_price <= target_sl_price:
                 return ExitSignal(
                     triggered=True,
                     exit_type=ExitTriggerType.STOP_LOSS,
                     close_percentage=1.0,
                     price=current_price,
-                    message=f"触发固定止损: {current_price} <= {entry_price * (1 - stop_loss_pct):.4f}"
+                    message=f"触发多头固定止损: {current_price} <= {sl_price_formatted}, 亏损: {-pnl_pct*100:.2f}%"
                 )
         else:  # short
             # 空头止盈
-            if current_price <= entry_price * (1 - take_profit_pct):
+            if current_price <= target_tp_price:
                 return ExitSignal(
                     triggered=True,
                     exit_type=ExitTriggerType.TAKE_PROFIT,
                     close_percentage=1.0,
                     price=current_price,
-                    message=f"触发固定止盈: {current_price} <= {entry_price * (1 - take_profit_pct):.4f}"
+                    message=f"触发空头固定止盈: {current_price} <= {tp_price_formatted}, 盈利: {pnl_pct*100:.2f}%"
                 )
             # 空头止损
-            elif current_price >= entry_price * (1 + stop_loss_pct):
+            elif current_price >= target_sl_price:
                 return ExitSignal(
                     triggered=True,
                     exit_type=ExitTriggerType.STOP_LOSS,
                     close_percentage=1.0,
                     price=current_price,
-                    message=f"触发固定止损: {current_price} >= {entry_price * (1 + stop_loss_pct):.4f}"
+                    message=f"触发空头固定止损: {current_price} >= {sl_price_formatted}, 亏损: {-pnl_pct*100:.2f}%"
                 )
         
         # 未触发条件
@@ -359,7 +392,14 @@ class TrailingStopExitStrategy(ExitStrategy):
         return (position.symbol, position_id)
     
     def init_position_resources(self, position: Any):
-        """初始化仓位相关资源"""
+        """
+        初始化持仓追踪止损的资源
+        """
+        # 先检查持仓是否已关闭
+        if hasattr(position, 'closed') and position.closed:
+            self.logger.warning(f"跳过初始化已关闭的持仓追踪止损资源: {position.symbol} (ID: {position.position_id})")
+            return
+            
         key = self._get_position_key(position)
         symbol = position.symbol
         entry_price = position.entry_price
@@ -451,42 +491,60 @@ class TrailingStopExitStrategy(ExitStrategy):
             
             # 更新最高价
             if current_price > self.highest_price[key]:
+                old_highest = self.highest_price[key]
                 self.highest_price[key] = current_price
+                self.logger.debug(f"{symbol} {direction}仓位更新最高价: {old_highest:.6f} -> {current_price:.6f}")
             
             # 只有当收益率超过激活百分比时才启用追踪止损
             if pnl_pct >= activation_pct:
                 # 计算追踪止损价格
                 stop_price = self.highest_price[key] * (1 - trailing_distance)
+                price_distance_pct = (self.highest_price[key] - current_price) / self.highest_price[key] * 100
+                stop_distance_pct = (current_price - stop_price) / current_price * 100
+                
+                self.logger.debug(f"{symbol} {direction}仓位追踪止损激活: 当前盈利={pnl_pct*100:.2f}% >= 激活阈值={activation_pct*100:.2f}%")
+                self.logger.debug(f"{symbol} {direction}仓位追踪止损价格: 最高价={self.highest_price[key]:.6f} * (1 - {trailing_distance}) = {stop_price:.6f}")
+                self.logger.debug(f"{symbol} {direction}仓位距离最高点: {price_distance_pct:.2f}%, 距离止损线: {stop_distance_pct:.2f}%")
                 
                 # 检查是否触发追踪止损
                 if current_price <= stop_price:
+                    self.logger.info(f"{symbol} 触发多头追踪止损: 最高价={self.highest_price[key]:.4f}, 当前价={current_price:.4f}, 止损线={stop_price:.4f}, 回撤={price_distance_pct:.2f}%")
                     return ExitSignal(
                         triggered=True,
                         exit_type=ExitTriggerType.TRAILING_STOP,
                         close_percentage=1.0,
                         price=current_price,
-                        message=f"触发追踪止损: 最高价={self.highest_price[key]:.4f}, 当前价={current_price:.4f}, 止损线={stop_price:.4f}"
+                        message=f"触发多头追踪止损: 最高价={self.highest_price[key]:.4f}, 当前价={current_price:.4f}, 止损线={stop_price:.4f}, 回撤={price_distance_pct:.2f}%"
                     )
         else:  # short
             pnl_pct = (entry_price - current_price) / entry_price
             
             # 更新最低价
             if current_price < self.lowest_price[key]:
+                old_lowest = self.lowest_price[key]
                 self.lowest_price[key] = current_price
+                self.logger.debug(f"{symbol} {direction}仓位更新最低价: {old_lowest:.6f} -> {current_price:.6f}")
             
             # 只有当收益率超过激活百分比时才启用追踪止损
             if pnl_pct >= activation_pct:
                 # 计算追踪止损价格
                 stop_price = self.lowest_price[key] * (1 + trailing_distance)
+                price_distance_pct = (current_price - self.lowest_price[key]) / self.lowest_price[key] * 100
+                stop_distance_pct = (stop_price - current_price) / current_price * 100
+                
+                self.logger.debug(f"{symbol} {direction}仓位追踪止损激活: 当前盈利={pnl_pct*100:.2f}% >= 激活阈值={activation_pct*100:.2f}%")
+                self.logger.debug(f"{symbol} {direction}仓位追踪止损价格: 最低价={self.lowest_price[key]:.6f} * (1 + {trailing_distance}) = {stop_price:.6f}")
+                self.logger.debug(f"{symbol} {direction}仓位距离最低点: {price_distance_pct:.2f}%, 距离止损线: {stop_distance_pct:.2f}%")
                 
                 # 检查是否触发追踪止损
                 if current_price >= stop_price:
+                    self.logger.info(f"{symbol} 触发空头追踪止损: 最低价={self.lowest_price[key]:.4f}, 当前价={current_price:.4f}, 止损线={stop_price:.4f}, 回撤={price_distance_pct:.2f}%")
                     return ExitSignal(
                         triggered=True,
                         exit_type=ExitTriggerType.TRAILING_STOP,
                         close_percentage=1.0,
                         price=current_price,
-                        message=f"触发追踪止损: 最低价={self.lowest_price[key]:.4f}, 当前价={current_price:.4f}, 止损线={stop_price:.4f}"
+                        message=f"触发空头追踪止损: 最低价={self.lowest_price[key]:.4f}, 当前价={current_price:.4f}, 止损线={stop_price:.4f}, 回撤={price_distance_pct:.2f}%"
                     )
         
         # 未触发条件
@@ -592,7 +650,14 @@ class LadderExitStrategy(ExitStrategy):
             self.logger.info(f"{symbol} (ID: {position_id}) 更新已平仓百分比: {current_percentage:.2f} -> {self.closed_percentage[key]:.2f}")
     
     def init_position_resources(self, position: Any):
-        """初始化仓位相关资源"""
+        """
+        初始化仓位相关资源
+        """
+        # 先检查持仓是否已关闭
+        if hasattr(position, 'closed') and position.closed:
+            self.logger.warning(f"跳过初始化已关闭的持仓阶梯平仓资源: {position.symbol} (ID: {position.position_id})")
+            return
+            
         key = self._get_position_key(position)
         symbol = position.symbol
         
@@ -858,7 +923,7 @@ class TimeBasedExitStrategy(ExitStrategy):
         
         # 如果持仓时间不足最小检查时间，不执行检查
         if holding_time_minutes < min_check_minutes:
-            self.logger.debug(f"{symbol} 持仓时间 {holding_time_minutes:.1f} 分钟，小于最小检查时间 {min_check_minutes} 分钟，跳过检查")
+            self.logger.debug(f"{symbol} {direction}仓位持仓时间 {holding_time_minutes:.1f} 分钟，小于最小检查时间 {min_check_minutes} 分钟，跳过检查")
             return ExitSignal(triggered=False, exit_type=ExitTriggerType.CUSTOM, 
                              close_percentage=0, price=current_price)
         
@@ -868,14 +933,14 @@ class TimeBasedExitStrategy(ExitStrategy):
             candles = await self._get_candle_data(symbol)
             
             if not candles or len(candles) < self.candle_count:
-                self.logger.warning(f"{symbol} K线数据不足 {self.candle_count} 根，跳过时间止损检查")
+                self.logger.warning(f"{symbol} {direction}仓位K线数据不足 {self.candle_count} 根，跳过时间止损检查")
                 return ExitSignal(triggered=False, exit_type=ExitTriggerType.CUSTOM, 
                                  close_percentage=0, price=current_price)
             
             # 检查K线是否有收益
             # 注意：K线按时间倒序排列，最新的在前面
-            direction = position.direction
             no_profit = True
+            pnl_percentages = []
             
             for i in range(self.candle_count):
                 if i >= len(candles):
@@ -883,31 +948,38 @@ class TimeBasedExitStrategy(ExitStrategy):
                     
                 close_price = float(candles[i][4])  # 收盘价在第4个位置
                 
+                # 计算每根K线的盈亏百分比
+                pnl_pct = 0
                 if direction == "long":
+                    pnl_pct = (close_price - entry_price) / entry_price * 100
                     # 多头：如果收盘价高于开仓价，说明有收益
                     if close_price > entry_price:
                         no_profit = False
                         break
                 else:  # short
+                    pnl_pct = (entry_price - close_price) / entry_price * 100
                     # 空头：如果收盘价低于开仓价，说明有收益
                     if close_price < entry_price:
                         no_profit = False
                         break
+                
+                pnl_percentages.append(pnl_pct)
             
             # 如果连续多根K线都没有收益，触发平仓
             if no_profit:
-                self.logger.info(f"{symbol} 连续 {self.candle_count} 根 {self.candle_timeframe} K线没有收益，触发时间止损")
-                
                 # 获取K线收盘价列表用于日志输出
                 close_prices = [float(candles[i][4]) for i in range(min(self.candle_count, len(candles)))]
-                self.logger.info(f"{symbol} 开仓价: {entry_price}, K线收盘价: {close_prices}")
+                
+                self.logger.info(f"{symbol} {direction}仓位连续 {self.candle_count} 根 {self.candle_timeframe} K线没有收益，触发时间止损")
+                self.logger.info(f"{symbol} {direction}仓位开仓价: {entry_price}, K线收盘价: {close_prices}")
+                self.logger.info(f"{symbol} {direction}仓位各K线盈亏百分比: {pnl_percentages}%")
                 
                 return ExitSignal(
                     triggered=True,
                     exit_type=ExitTriggerType.TIME_BASED,
                     close_percentage=1.0,
                     price=current_price,
-                    message=f"连续 {self.candle_count} 根 {self.candle_timeframe} K线没有收益，触发时间止损"
+                    message=f"{direction}仓位连续 {self.candle_count} 根 {self.candle_timeframe} K线没有收益，触发时间止损"
                 )
             
             # 未触发条件
@@ -1083,10 +1155,19 @@ class ATRBasedExitStrategy(ExitStrategy):
         return (position.symbol, position_id)
     
     def init_position_resources(self, position: Any):
-        """初始化仓位相关资源"""
-        key = self._get_position_key(position)
+        """
+        初始化持仓相关的资源，主要是添加持仓到ATR计算资源池
+        """
+        # 先检查持仓是否已关闭
+        if hasattr(position, 'closed') and position.closed:
+            self.logger.warning(f"跳过初始化已关闭的持仓ATR资源: {position.symbol} (ID: {position.position_id})")
+            return
+            
         symbol = position.symbol
         entry_price = position.entry_price
+        
+        # 获取仓位的唯一键
+        key = self._get_position_key(position)
         
         # 使用position的high_price和low_price，如果有的话
         if hasattr(position, 'high_price') and position.high_price:
@@ -1099,7 +1180,7 @@ class ATRBasedExitStrategy(ExitStrategy):
         else:
             self.lowest_price[key] = entry_price
             
-        self.logger.info(f"初始化ATR止损仓位资源: {symbol} (ID: {key[1]}), 入场价: {entry_price}")
+        self.logger.info(f"初始化ATR止损仓位资源: {symbol} (ID: {position.position_id}), 入场价: {entry_price}")
     
     def clean_symbol_resources(self, symbol: str, position_id: str = None):
         """清理与指定交易对相关的资源"""
@@ -1292,7 +1373,7 @@ class ATRBasedExitStrategy(ExitStrategy):
         atr_multiplier = custom_multiplier if custom_multiplier is not None else self.atr_multiplier
         
         # 记录使用的参数
-        self.logger.info(f"{symbol} ATR止损验证 - 仓位信息: 方向={direction}, 入场价={entry_price:.6f}, 当前价={current_price:.6f}, "
+        self.logger.info(f"{symbol} ATR止损验证 - {direction}仓位信息: 入场价={entry_price:.6f}, 当前价={current_price:.6f}, "
                          f"杠杆={leverage}, 开仓时间={position_time}, ATR乘数={atr_multiplier}")
         
         # 获取ATR值
@@ -1312,6 +1393,12 @@ class ATRBasedExitStrategy(ExitStrategy):
         if key not in self.highest_price or key not in self.lowest_price:
             self.init_position_resources(position)
         
+        # 计算当前盈亏百分比
+        if direction == "long":
+            pnl_pct = (current_price - entry_price) / entry_price * 100
+        else:  # short
+            pnl_pct = (entry_price - current_price) / entry_price * 100
+        
         # 计算止损价格
         if direction == "long":
             # 更新最高价
@@ -1323,19 +1410,19 @@ class ATRBasedExitStrategy(ExitStrategy):
             
             # 检查是否触发止损
             if current_price <= stop_price:
-                self.logger.info(f"{symbol} (ID: {key[1]}) 触发ATR止损: 入场价={entry_price:.6f}, " +
+                self.logger.info(f"{symbol} (ID: {key[1]}) 触发多头ATR止损: 入场价={entry_price:.6f}, " +
                                f"当前价={current_price:.6f}, 止损线={stop_price:.6f}, " +
-                               f"ATR={atr_value:.6f}, 止损距离={atr_stop_price_distance:.6f}")
+                               f"ATR={atr_value:.6f}, 止损距离={atr_stop_price_distance:.6f}, 盈亏={pnl_pct:.2f}%")
                            
                 return ExitSignal(
                     triggered=True,
                     exit_type=ExitTriggerType.ATR_BASED,
                     close_percentage=1.0,
                     price=current_price,
-                    message=f"触发ATR止损: ATR={atr_value:.6f}, 止损线={stop_price:.6f}"
+                    message=f"触发多头ATR止损: ATR={atr_value:.6f}, 止损线={stop_price:.6f}, 盈亏={pnl_pct:.2f}%"
                 )
             else:
-                self.logger.info(f"{symbol} (ID: {key[1]}) 未触发ATR止损: 当前价 {current_price:.6f} > 止损价 {stop_price:.6f}, 差距: {(current_price - stop_price):.6f}")
+                self.logger.info(f"{symbol} (ID: {key[1]}) 未触发多头ATR止损: 当前价 {current_price:.6f} > 止损价 {stop_price:.6f}, 差距: {(current_price - stop_price):.6f}, 盈亏: {pnl_pct:.2f}%")
         else:  # short
             # 更新最低价
             if current_price < self.lowest_price[key]:
@@ -1346,19 +1433,19 @@ class ATRBasedExitStrategy(ExitStrategy):
             
             # 检查是否触发止损
             if current_price >= stop_price:
-                self.logger.info(f"{symbol} (ID: {key[1]}) 触发ATR止损: 入场价={entry_price:.6f}, " +
+                self.logger.info(f"{symbol} (ID: {key[1]}) 触发空头ATR止损: 入场价={entry_price:.6f}, " +
                                f"当前价={current_price:.6f}, 止损线={stop_price:.6f}, " +
-                               f"ATR={atr_value:.6f}, 止损距离={atr_stop_price_distance:.6f}")
+                               f"ATR={atr_value:.6f}, 止损距离={atr_stop_price_distance:.6f}, 盈亏={pnl_pct:.2f}%")
                            
                 return ExitSignal(
                     triggered=True,
                     exit_type=ExitTriggerType.ATR_BASED,
                     close_percentage=1.0,
                     price=current_price,
-                    message=f"触发ATR止损: ATR={atr_value:.6f}, 止损线={stop_price:.6f}"
+                    message=f"触发空头ATR止损: ATR={atr_value:.6f}, 止损线={stop_price:.6f}, 盈亏={pnl_pct:.2f}%"
                 )
             else:
-                self.logger.info(f"{symbol} (ID: {key[1]}) 未触发ATR止损: 当前价 {current_price:.6f} < 止损价 {stop_price:.6f}, 差距: {(stop_price - current_price):.6f}")
+                self.logger.info(f"{symbol} (ID: {key[1]}) 未触发空头ATR止损: 当前价 {current_price:.6f} < 止损价 {stop_price:.6f}, 差距: {(stop_price - current_price):.6f}, 盈亏: {pnl_pct:.2f}%")
         
         # 未触发条件
         return ExitSignal(
@@ -1397,6 +1484,441 @@ class ATRBasedExitStrategy(ExitStrategy):
             trader=trader
         )
 
+class OrderedTakeProfitStopLossStrategy(ExitStrategy):
+    """委托单止盈止损策略：开始监控时就直接委托止盈限价单，同时监控止损条件，满足止损条件时撤销止盈单并委托市价止损单"""
+    
+    def __init__(self, app_name: str, take_profit_pct: float = 0.05, stop_loss_pct: float = 0.03, 
+                 priority: int = 15, name: str = "委托单止盈止损", position_mgr=None, 
+                 strategy_config=None, data_cache=None, trader=None):
+        """
+        初始化委托单止盈止损策略
+        
+        Args:
+            app_name: 应用名称，用于日志记录
+            take_profit_pct: 止盈百分比，默认0.05(5%)
+            stop_loss_pct: 止损百分比，默认0.03(3%)
+            priority: 优先级，数值越小优先级越高
+            name: 策略名称
+            position_mgr: 仓位管理器
+            strategy_config: 策略配置
+            data_cache: 数据缓存对象
+            trader: 交易执行器
+        """
+        super().__init__(app_name, name, priority, position_mgr, strategy_config, data_cache, trader)
+        
+        # 从策略配置中读取止盈止损参数，如果没有则使用默认值
+        if strategy_config and 'strategy' in strategy_config:
+            strategy_settings = strategy_config['strategy']
+            self.take_profit_pct = strategy_settings.get('take_profit_pct', take_profit_pct)
+            self.stop_loss_pct = strategy_settings.get('stop_loss_pct', stop_loss_pct)
+            self.check_order_interval = strategy_settings.get('check_order_interval', 60)  # 默认60秒检查一次订单状态
+        else:
+            self.take_profit_pct = take_profit_pct
+            self.stop_loss_pct = stop_loss_pct
+            self.check_order_interval = 60
+        
+        # 保存已提交的止盈止损订单
+        # key: (symbol, position_id), value: {"tp_order_id": "xxx", "status": "submitted", "last_check_time": timestamp}
+        self.submitted_orders = {}
+        
+        self.logger.info(f"委托单止盈止损策略参数: 止盈={self.take_profit_pct*100:.2f}%, 止损={self.stop_loss_pct*100:.2f}%, 订单检查间隔={self.check_order_interval}秒")
+    
+    def _get_position_key(self, position):
+        """获取仓位的唯一键"""
+        position_id = getattr(position, 'id', None) or getattr(position, 'position_id', str(id(position)))
+        return (position.symbol, position_id)
+    
+    async def _check_order_status(self, symbol: str, order_id: str) -> str:
+        """
+        检查订单状态
+        
+        Args:
+            symbol: 交易对
+            order_id: 订单ID
+            
+        Returns:
+            str: 订单状态, 可能的值: 'open', 'filled', 'canceled', 'unknown'
+        """
+        if not self.trader:
+            self.logger.warning(f"未提供交易执行器，无法检查订单 {order_id} 状态")
+            return "unknown"
+        
+        try:
+            # 调用trader的get_order_details方法查询订单状态
+            result = self.trader.get_order_details(symbol, order_id)
+            
+            if not result or 'code' not in result or result['code'] != '0':
+                error_msg = result.get('msg', '未知错误') if result else '请求失败'
+                self.logger.warning(f"获取订单状态失败: {symbol} 订单ID={order_id}, 错误: {error_msg}")
+                return "unknown"
+                
+            # 解析订单数据
+            if 'data' in result and len(result['data']) > 0:
+                order_data = result['data'][0]
+                status = order_data.get('state', '').lower()
+                
+                # OKEx订单状态映射
+                # canceled: 撤单成功
+                # live: 等待成交
+                # partially_filled: 部分成交
+                # filled: 完全成交
+                if status in ['filled', 'complete', 'completed']:
+                    self.logger.info(f"订单已成交: {symbol} 订单ID={order_id}")
+                    return "filled"
+                elif status in ['partially_filled']:
+                    self.logger.info(f"订单部分成交: {symbol} 订单ID={order_id}")
+                    return "partially_filled"
+                elif status in ['live', 'open', 'active', 'new']:
+                    self.logger.debug(f"订单仍在挂单中: {symbol} 订单ID={order_id}")
+                    return "open"
+                elif status in ['canceled', 'cancelled', 'rejected']:
+                    self.logger.info(f"订单已取消: {symbol} 订单ID={order_id}")
+                    return "canceled"
+                else:
+                    self.logger.warning(f"未知订单状态: {symbol} 订单ID={order_id}, 状态={status}")
+                    return "unknown"
+            else:
+                self.logger.warning(f"未找到订单数据: {symbol} 订单ID={order_id}")
+                return "unknown"
+            
+        except Exception as e:
+            self.logger.error(f"检查订单状态异常: {e}", exc_info=True)
+            return "unknown"
+    
+    def init_position_resources(self, position: Any):
+        """
+        初始化仓位相关资源 - 提交止盈限价单
+        
+        Args:
+            position: 仓位对象
+        """
+        # 先检查持仓是否已关闭
+        if hasattr(position, 'closed') and position.closed:
+            self.logger.warning(f"跳过初始化已关闭的持仓委托单资源: {position.symbol} (ID: {position.position_id})")
+            return
+            
+        # 获取仓位信息
+        symbol = position.symbol
+        direction = position.direction
+        entry_price = position.entry_price
+        quantity = position.quantity  # 使用quantity而不是size
+        key = self._get_position_key(position)
+        
+        # 如果已有该仓位的订单记录，跳过
+        if key in self.submitted_orders:
+            self.logger.info(f"仓位 {symbol} (ID: {key[1]}) 已有委托单记录，跳过初始化")
+            return
+        
+        # 获取止盈止损设置 - 可能来自仓位或信号
+        signal = getattr(position, 'signal', None)
+        take_profit_pct = signal.take_profit_pct if signal and hasattr(signal, 'take_profit_pct') and signal.take_profit_pct is not None else self.take_profit_pct
+        leverage = getattr(position, 'leverage', 1)
+        
+        # 如果有杠杆，需要调整止盈止损比例
+        if leverage > 1:
+            take_profit_pct = take_profit_pct / leverage
+
+        # 如果没有交易执行器，无法提交订单
+        if not self.trader:
+            self.logger.warning(f"未提供交易执行器，无法为 {symbol} 提交止盈限价单")
+            return
+        
+        # 计算止盈价格
+        tp_price = 0
+        
+        # 计算止盈价格和操作方向
+        if direction == "long":
+            tp_price = entry_price * (1 + take_profit_pct)
+            tp_side = "sell"  # 多仓止盈卖出
+            pos_side = "long"  # 持仓方向为多
+        else:  # short
+            tp_price = entry_price * (1 - take_profit_pct)
+            tp_side = "buy"   # 空仓止盈买入
+            pos_side = "short"  # 持仓方向为空
+
+        # 确定是否为现货或合约
+        is_spot = not ("-SWAP" in symbol or "-FUTURES" in symbol or "-PERPETUAL" in symbol)
+        # 将价格精度调整为合适的小数位数
+        # 从交易所获取价格精度，而不是硬编码为4
+        if self.trader:
+            precision = get_price_precision(self.trader, symbol, is_spot)
+            tp_price = round(tp_price, precision)
+            self.logger.debug(f"使用交易所价格精度 {precision} 位小数，调整止盈价格为: {tp_price}")
+        else:
+            tp_price = round(tp_price, 4)  # 如果无法获取精度，使用默认值
+            self.logger.warning(f"无法获取交易所价格精度，使用默认值(4)，止盈价格: {tp_price}")
+        
+        # 提交止盈限价单
+        try:
+            if is_spot:
+                # 现货限价单
+                params = {
+                    "instId": symbol,
+                    "tdMode": "cash",
+                    "side": tp_side,
+                    "ordType": "limit",
+                    "px": str(tp_price),
+                    "sz": str(abs(quantity)),  # 使用绝对值确保数量总是正数
+                    "reduceOnly": "true"  # 确保是平仓单
+                }
+                self.logger.debug(f"提交现货限价止盈单参数: {params}")
+                result = self.trader._request("POST", "/api/v5/trade/order", params)
+            else:
+                # 合约限价单
+                params = {
+                    "instId": symbol,
+                    "tdMode": "cross",
+                    "side": tp_side,
+                    "posSide": pos_side,
+                    "ordType": "limit",
+                    "px": str(tp_price),
+                    "sz": str(abs(quantity)),  # 使用绝对值确保数量总是正数
+                    "reduceOnly": "true"  # 确保是平仓单
+                }
+                self.logger.debug(f"提交合约限价止盈单参数: {params}")
+                result = self.trader._request("POST", "/api/v5/trade/order", params)
+            
+            # 检查下单结果
+            if result.get('code') == '0' and 'data' in result and len(result['data']) > 0:
+                order_id = result['data'][0].get('ordId')
+                if order_id:
+                    now = time.time()
+                    self.submitted_orders[key] = {
+                        "tp_order_id": order_id,
+                        "status": "submitted",
+                        "tp_price": tp_price,
+                        "direction": direction,
+                        "last_check_time": now  # 记录最后检查时间
+                    }
+                    self.logger.info(f"为 {symbol} {direction}仓位提交止盈限价单成功: 价格={tp_price:.6f}, 订单ID={order_id}")
+                else:
+                    self.logger.error(f"为 {symbol} {direction}仓位提交止盈限价单失败: 无法获取订单ID, 响应={result}")
+            else:
+                error_msg = result.get('msg', '未知错误')
+                self.logger.error(f"为 {symbol} {direction}仓位提交止盈限价单失败: {error_msg}, 响应={result}")
+        except Exception as e:
+            self.logger.error(f"提交止盈限价单异常: {e}", exc_info=True)
+    
+    def clean_symbol_resources(self, symbol: str, position_id: str = None):
+        """
+        清理与指定交易对相关的资源，撤销未成交的订单
+        
+        Args:
+            symbol: 交易对
+            position_id: 仓位ID，如果提供则只清理该仓位的资源
+        """
+        # 如果指定了仓位ID，只清理该仓位的资源
+        if position_id:
+            key = (symbol, position_id)
+            order_info = self.submitted_orders.get(key)
+            if order_info and order_info["status"] == "submitted":
+                self._cancel_order(symbol, order_info["tp_order_id"])
+            
+            if key in self.submitted_orders:
+                del self.submitted_orders[key]
+            
+            self.logger.info(f"清理委托单资源: {symbol} (ID: {position_id})")
+        else:
+            # 否则清理该交易对的所有资源
+            keys_to_remove = []
+            for key, order_info in self.submitted_orders.items():
+                if key[0] == symbol:
+                    if order_info["status"] == "submitted":
+                        self._cancel_order(symbol, order_info["tp_order_id"])
+                    keys_to_remove.append(key)
+            
+            for key in keys_to_remove:
+                del self.submitted_orders[key]
+            
+            self.logger.info(f"清理委托单资源: {symbol} (所有仓位)")
+    
+    def _cancel_order(self, symbol: str, order_id: str) -> bool:
+        """
+        撤销订单
+        
+        Args:
+            symbol: 交易对
+            order_id: 订单ID
+            
+        Returns:
+            bool: 是否成功撤销
+        """
+        if not self.trader:
+            self.logger.warning(f"未提供交易执行器，无法撤销订单 {order_id}")
+            return False
+        
+        try:
+            # 使用OKEx的cancel_order方法撤销订单
+            result = self.trader.cancel_order(symbol, order_id)
+            
+            # 检查撤单结果
+            success = False
+            if result and isinstance(result, dict):
+                if result.get('code') == '0':
+                    success = True
+                    self.logger.info(f"撤销 {symbol} 订单成功: {order_id}")
+                else:
+                    error_msg = result.get('msg', '未知错误')
+                    # 如果错误是因为订单不存在或已完成，也视为成功
+                    if "order does not exist" in error_msg.lower() or "order already fully filled" in error_msg.lower():
+                        self.logger.info(f"订单 {order_id} 已不存在或已完成，视为撤单成功")
+                        success = True
+                    else:
+                        self.logger.warning(f"撤销 {symbol} 订单失败: {error_msg}")
+            else:
+                self.logger.warning(f"撤销 {symbol} 订单失败: 返回结果异常 {result}")
+            
+            return success
+            
+        except Exception as e:
+            self.logger.error(f"撤销订单异常: {e}", exc_info=True)
+            return False
+    
+    async def check_exit_condition(self, position: Any, current_price: float, **kwargs) -> ExitSignal:
+        """
+        检查是否满足止损条件（止盈由委托单负责）
+        同时检查委托单的状态，如果止盈已经成交，将返回触发信号
+        
+        Args:
+            position: 仓位对象
+            current_price: 当前价格
+            kwargs: 额外参数
+            
+        Returns:
+            ExitSignal: 平仓信号
+        """
+        if not self.enabled:
+            return ExitSignal(triggered=False, exit_type=ExitTriggerType.CUSTOM, 
+                             close_percentage=0, price=current_price)
+        
+        # 获取仓位信息
+        symbol = position.symbol
+        direction = position.direction
+        entry_price = position.entry_price
+        pos_id = position.position_id
+        key = self._get_position_key(position)
+        
+        # 获取价格精度
+        precision = 4  # 默认精度
+        if self.trader:
+            # 确定是否为现货或合约
+            is_spot = not ("-SWAP" in symbol or "-FUTURES" in symbol or "-PERPETUAL" in symbol)
+            try:
+                precision = get_price_precision(self.trader, symbol, is_spot)
+            except Exception as e:
+                self.logger.warning(f"获取价格精度失败，使用默认值: {e}")
+        
+        # 1. 检查我们是否有此仓位的止盈委托单
+        if key not in self.submitted_orders:
+            # 如果没有记录委托单，尝试初始化该仓位
+            self.logger.info(f"没有找到 {symbol} (ID: {pos_id}) 的委托单记录，尝试初始化")
+            self.init_position_resources(position)
+            
+            # 再次检查是否成功创建了委托单
+            if key not in self.submitted_orders:
+                self.logger.warning(f"初始化 {symbol} (ID: {pos_id}) 的委托单失败，跳过检查")
+                return ExitSignal(triggered=False, exit_type=ExitTriggerType.CUSTOM, 
+                                 close_percentage=0, price=current_price)
+        
+        order_data = self.submitted_orders[key]
+        tp_order_id = order_data.get('tp_order_id')
+        
+        # 2. 检查止盈委托单状态
+        if tp_order_id:
+            order_status = await self._check_order_status(symbol, tp_order_id)
+            
+            # 如果订单已完成
+            if order_status in ['canceled', 'unknown', 'filled']:
+                self.logger.info(f"{symbol} (ID: {pos_id}) 止盈委托单已成交: {tp_order_id}")
+                
+                # 返回止盈触发信号
+                tp_price = order_data.get('tp_price', current_price)
+                return ExitSignal(
+                    triggered=True,
+                    exit_type=ExitTriggerType.TAKE_PROFIT,
+                    close_percentage=1.0,
+                    price=tp_price,
+                    message=f"止盈委托单已成交: {tp_order_id}, 价格: {tp_price}",
+                    need_cleanup=True
+                )
+        # 3. 检查是否触发止损条件（如果止盈未触发）
+        # 获取杠杆倍数
+        leverage = getattr(position, 'leverage', 1)
+        
+        # 获取止盈止损设置 - 可能来自仓位或信号
+        signal = getattr(position, 'signal', None)
+        take_profit_pct = signal.take_profit_pct if signal and hasattr(signal, 'take_profit_pct') and signal.take_profit_pct is not None else self.take_profit_pct
+        stop_loss_pct = signal.stop_loss_pct if signal and hasattr(signal, 'stop_loss_pct') and signal.stop_loss_pct is not None else self.stop_loss_pct
+        
+        # 如果有杠杆，需要调整止盈止损比例
+        if leverage > 1:
+            take_profit_pct = take_profit_pct / leverage
+            stop_loss_pct = stop_loss_pct / leverage
+        
+        # 计算止损价格
+        if direction == "long":
+            stop_loss_price = entry_price * (1 - stop_loss_pct)
+            # 使用动态精度格式化价格
+            sl_price_formatted = f"{{:.{precision}f}}".format(stop_loss_price)
+            # 检查是否触发止损
+            if current_price <= stop_loss_price:
+                self.logger.info(f"{symbol} 触发止损: 当前价格 {current_price} <= 止损价格 {sl_price_formatted}")
+                return ExitSignal(
+                    triggered=True,
+                    exit_type=ExitTriggerType.STOP_LOSS,
+                    close_percentage=1.0,
+                    price=current_price,
+                    message=f"价格下跌触发止损: {current_price:.{precision}f} <= {sl_price_formatted}"
+                )
+        else:  # short
+            stop_loss_price = entry_price * (1 + stop_loss_pct)
+            # 使用动态精度格式化价格
+            sl_price_formatted = f"{{:.{precision}f}}".format(stop_loss_price)
+            # 检查是否触发止损
+            if current_price >= stop_loss_price:
+                self.logger.info(f"{symbol} 触发止损: 当前价格 {current_price} >= 止损价格 {sl_price_formatted}")
+                return ExitSignal(
+                    triggered=True,
+                    exit_type=ExitTriggerType.STOP_LOSS,
+                    close_percentage=1.0,
+                    price=current_price,
+                    message=f"价格上涨触发止损: {current_price:.{precision}f} >= {sl_price_formatted}"
+                )
+        
+        # 没有触发任何条件
+        return ExitSignal(
+            triggered=False, 
+            exit_type=ExitTriggerType.CUSTOM, 
+            close_percentage=0, 
+            price=current_price
+        )
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """将策略转换为字典，用于序列化"""
+        data = super().to_dict()
+        data.update({
+            "take_profit_pct": self.take_profit_pct,
+            "stop_loss_pct": self.stop_loss_pct,
+            "check_order_interval": self.check_order_interval
+        })
+        return data
+    
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any], app_name: str, position_mgr=None, 
+                 strategy_config=None, data_cache=None, trader=None) -> 'OrderedTakeProfitStopLossStrategy':
+        """从字典创建策略对象"""
+        return cls(
+            app_name=app_name,
+            take_profit_pct=data.get("take_profit_pct", 0.05),
+            stop_loss_pct=data.get("stop_loss_pct", 0.03),
+            priority=data.get("priority", 15),
+            name=data.get("name", "委托单止盈止损"),
+            position_mgr=position_mgr,
+            strategy_config=strategy_config,
+            data_cache=data_cache,
+            trader=trader
+        )
+
 class ExitStrategyManager:
     """平仓策略管理器"""
     
@@ -1406,27 +1928,46 @@ class ExitStrategyManager:
         初始化平仓策略管理器
         
         Args:
-            app_name: 应用名称，用于日志记录
+            app_name: 应用名称
             position_mgr: 仓位管理器
             strategy_config: 策略配置
             data_cache: 数据缓存对象
             trader: 交易执行器
         """
         self.app_name = app_name
+        self.logger = logging.getLogger(app_name)
         self.position_mgr = position_mgr
         self.strategy_config = strategy_config or {}
         self.data_cache = data_cache
         self.trader = trader
-        self.logger = logging.getLogger(app_name)
-        
-        # 存储策略的字典 {策略名称: 策略对象}
-        self.strategies = {}
-        
-        # 记录初始化信息
+        self.strategies = {}  # {strategy_name: strategy_obj}
         self.logger.info(f"初始化平仓策略管理器")
+        # 读取和应用统一的策略配置
+        if strategy_config:
+            self.strategy_config = strategy_config
+            self.load_default_strategies()
+        else:
+            self.strategy_config = None
+            self.logger.warning("没有指定策略配置，未自动加载退出策略")
         
-        # 加载默认策略
-        self.load_default_strategies()
+        # 初始化已有仓位的资源 - 明确指定不包含已关闭的持仓
+        if self.position_mgr:
+            try:
+                # 显式指定include_closed=False确保只加载未关闭的持仓
+                positions = self.position_mgr.load_positions(dict_format=True, include_closed=False)
+                self.logger.info(f"加载未关闭持仓进行退出策略初始化: {len(positions)}个")
+                for symbol, position in positions.items():
+                    # 二次检查确保持仓未关闭
+                    if hasattr(position, 'closed') and position.closed:
+                        self.logger.warning(f"跳过初始化已关闭的持仓: {symbol} (ID: {position.position_id})")
+                        continue
+                        
+                    self.logger.info(f"初始化退出策略管理器中 {symbol} 仓位的资源 (ID: {position.position_id}), 入场价: {position.entry_price}")
+                    for strategy in self.strategies.values():
+                        if hasattr(strategy, 'init_position_resources'):
+                            strategy.init_position_resources(position)
+            except Exception as e:
+                self.logger.error(f"初始化已有仓位资源异常: {e}", exc_info=True)
     
     def load_default_strategies(self):
         """加载默认策略"""
@@ -1512,6 +2053,21 @@ class ExitStrategyManager:
         )
         self.add_strategy(time_strategy)
         
+        # 委托单止盈止损策略
+        ordered_tp_sl_config = None
+        if 'ordered_tp_sl' in exit_strategies_config:
+            ordered_tp_sl_config = {'strategy': exit_strategies_config['ordered_tp_sl']}
+            self.logger.info(f"委托单止盈止损策略配置: {ordered_tp_sl_config}")
+        
+        ordered_tp_sl_strategy = OrderedTakeProfitStopLossStrategy(
+            app_name=self.app_name,
+            position_mgr=self.position_mgr,
+            strategy_config=ordered_tp_sl_config,
+            data_cache=self.data_cache,
+            trader=self.trader
+        )
+        self.add_strategy(ordered_tp_sl_strategy)
+        
         # 根据配置启用或禁用策略
         if 'default_enabled' in exit_strategies_config:
             enabled_strategies = exit_strategies_config['default_enabled']
@@ -1522,7 +2078,8 @@ class ExitStrategyManager:
                 'atr_stop_loss': ATRBasedExitStrategy,
                 'trailing_stop': TrailingStopExitStrategy,
                 'ladder_exit': LadderExitStrategy,
-                'time_based_exit': TimeBasedExitStrategy
+                'time_based_exit': TimeBasedExitStrategy,
+                'ordered_tp_sl': OrderedTakeProfitStopLossStrategy
             }
             
             # 先禁用所有策略
@@ -1550,6 +2107,8 @@ class ExitStrategyManager:
                 config_key = 'ladder_exit'
             elif isinstance(strategy, TimeBasedExitStrategy):
                 config_key = 'time_based_exit'
+            elif isinstance(strategy, OrderedTakeProfitStopLossStrategy):
+                config_key = 'ordered_tp_sl'
             
             if config_key and config_key in exit_strategies_config:
                 enabled = exit_strategies_config[config_key].get('enabled', True)
@@ -1576,16 +2135,6 @@ class ExitStrategyManager:
                 self.logger.info(f"  - 阶梯间隔: {strategy.ladder_step_pct*100:.2f}%, 每阶梯平仓比例: {strategy.close_pct_per_step*100:.2f}%")
             elif isinstance(strategy, TimeBasedExitStrategy):
                 self.logger.info(f"  - K线周期: {strategy.candle_timeframe}, K线数量: {strategy.candle_count}")
-        
-        # 初始化已有仓位的资源
-        if self.position_mgr:
-            positions = self.position_mgr.load_positions(dict_format=True)
-            for symbol, position in positions.items():
-                if not position.closed:
-                    self.logger.info(f"初始化退出策略管理器中 {symbol} 仓位的资源")
-                    for strategy in self.strategies.values():
-                        if hasattr(strategy, 'init_position_resources'):
-                            strategy.init_position_resources(position)
     
     def add_strategy(self, strategy: ExitStrategy) -> None:
         """
@@ -1676,7 +2225,7 @@ class ExitStrategyManager:
             self.logger.info(f"更新平仓策略参数: {strategy_name}, {params}")
     
     async def check_exit_conditions(self, position: Any, current_price: float, 
-                                  execute_close_func: Callable = None, **kwargs) -> bool:
+                                  execute_close_func: Callable = None, **kwargs) -> Tuple[bool, Optional[ExitSignal]]:
         """
         检查所有策略是否满足平仓条件，并执行平仓
         
@@ -1687,16 +2236,16 @@ class ExitStrategyManager:
             kwargs: 额外参数
             
         Returns:
-            bool: 是否有策略触发并执行了平仓
+            Tuple[bool, Optional[ExitSignal]]: 
+                - 第一个元素表示是否有策略触发并执行了平仓
+                - 第二个元素包含退出信号（如有），特别是当need_cleanup=True时
         """
-        if not self.strategies:
-            return False
+        import time  # 导入time模块用于获取时间戳
+        from typing import Tuple, Optional  # 导入类型提示
         
-        # 首先初始化所有策略的仓位资源
-        for strategy in self.strategies.values():
-            if hasattr(strategy, 'init_position_resources'):
-                strategy.init_position_resources(position)
-            
+        if not self.strategies:
+            return False, None
+        
         # 按优先级排序策略
         sorted_strategies = sorted(self.strategies.values(), key=lambda s: s.priority)
         
@@ -1705,20 +2254,47 @@ class ExitStrategyManager:
             if not strategy.enabled:
                 continue
                 
-            signal = await strategy.check_exit_condition(position, current_price, **kwargs)
+            signal = await strategy.check_exit_condition(position, current_price, 
+                                                       exit_strategy_manager=self,
+                                                       **kwargs)
+            
+            # 处理需要清理的信号
+            if signal and signal.need_cleanup:
+                self.logger.info(f"策略 {strategy.name} 信号需要执行完整平仓清理流程: {signal.message}")
+                # 直接将需要清理的信号返回出去，让BaseStrategy处理
+                return True, signal
+            
+            # 处理常规触发信号            
             if signal and signal.triggered:
                 self.logger.info(f"策略 {strategy.name} 触发平仓: {signal.message}")
+                
+                # 尝试取消可能存在的委托单
+                try:
+                    # 检查是否有OrderedTakeProfitStopLossStrategy并取消相关订单
+                    tp_sl_strategy = self.get_strategy("委托单止盈止损")
+                    if tp_sl_strategy and hasattr(tp_sl_strategy, '_get_position_key') and hasattr(tp_sl_strategy, 'submitted_orders') and hasattr(tp_sl_strategy, '_cancel_order'):
+                        key = tp_sl_strategy._get_position_key(position)
+                        if key in tp_sl_strategy.submitted_orders:
+                            order_info = tp_sl_strategy.submitted_orders[key]
+                            if order_info.get("status") == "submitted":
+                                tp_sl_strategy._cancel_order(position.symbol, order_info.get("tp_order_id"))
+                                self.logger.info(f"已取消 {position.symbol} 的止盈委托单，订单ID: {order_info.get('tp_order_id')}")
+                                # 更新状态并移除已取消的订单
+                                order_info["status"] = "canceled"
+                                # 稍后会在平仓成功后清理，这里不移除
+                except Exception as e:
+                    self.logger.warning(f"尝试取消委托单时发生错误: {e}")
                 
                 # 执行平仓
                 success = await strategy.execute_exit(position, signal, execute_close_func)
                 
                 if success:
                     self.logger.info(f"策略 {strategy.name} 平仓执行成功")
-                    return True
+                    return True, None
                 else:
                     self.logger.warning(f"策略 {strategy.name} 平仓执行失败")
                 
-        return False
+        return False, None
     
     def to_dict(self) -> Dict[str, Any]:
         """将所有策略转换为字典，用于序列化"""
@@ -1765,8 +2341,12 @@ class ExitStrategyManager:
                 strategy = LadderExitStrategy.from_dict(strategy_data, app_name, position_mgr, strategy_config, data_cache, trader)
             elif strategy_type == "TimeBasedExitStrategy":
                 strategy = TimeBasedExitStrategy.from_dict(strategy_data, app_name, position_mgr, strategy_config, data_cache, trader)
+            elif strategy_type == "ATRBasedExitStrategy":
+                strategy = ATRBasedExitStrategy.from_dict(strategy_data, app_name, position_mgr, strategy_config, data_cache, trader)
+            elif strategy_type == "OrderedTakeProfitStopLossStrategy":
+                strategy = OrderedTakeProfitStopLossStrategy.from_dict(strategy_data, app_name, position_mgr, strategy_config, data_cache, trader)
             
             if strategy:
                 manager.add_strategy(strategy)
         
-        return manager 
+        return manager

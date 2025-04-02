@@ -375,6 +375,12 @@ class BaseStrategy(ABC):
         leverage = signal.leverage or self.leverage
         extra_data = signal.extra_data or {}
         
+        # 检查是否已有该交易对的未平仓持仓
+        positions = self.get_positions()
+        if symbol in positions and not positions[symbol].closed:
+            self.logger.warning(f"已存在未平仓的持仓: {symbol}，拒绝重复开仓")
+            return False, f"拒绝重复开仓: 已存在未平仓的持仓 {symbol}"
+        
         # 处理退出策略配置
         if extra_data and 'exit_strategies' in extra_data:
             exit_strategies_config = extra_data['exit_strategies']
@@ -529,6 +535,8 @@ class BaseStrategy(ABC):
         self.status = StrategyStatus.POSITION_OPENED
         self.status_message = f"已开仓 {symbol} {direction}, 数量: {calculated_quantity}, 价格: {current_price}"
         
+        await self._sync_positions_task()
+
         return True, f"开仓成功: {symbol} {direction}, 数量: {calculated_quantity}, 价格: {current_price}"
     
     async def _handle_close_signal(self, signal: TradeSignal) -> Tuple[bool, str]:
@@ -789,11 +797,27 @@ class BaseStrategy(ABC):
                         return await self._execute_close_position(symbol, position, close_percentage)
                     
                     # 调用退出策略管理器检查平仓条件
-                    await self.exit_strategy_manager.check_exit_conditions(
+                    exit_triggered, exit_signal = await self.exit_strategy_manager.check_exit_conditions(
                         position=position,
                         current_price=mark_price,
-                        execute_close_func=execute_close_callback
+                        execute_close_func=execute_close_callback,
+                        strategy=self  # 仅用于启动仓位更新任务
                     )
+                    
+                    # 如果返回的信号需要执行完整平仓清理，调用_execute_position_cleanup
+                    if exit_triggered and exit_signal and exit_signal.need_cleanup:
+                        self.logger.info(f"收到需要执行完整平仓清理的信号: {exit_signal.message}")
+                        
+                        # 执行完整的平仓清理流程
+                        success = await self._execute_position_cleanup(
+                            position=position, 
+                            exit_price=exit_signal.price
+                        )
+                        
+                        if success:
+                            self.logger.info(f"{position.symbol} 完整平仓清理流程执行成功")
+                        else:
+                            self.logger.warning(f"{position.symbol} 完整平仓清理流程执行失败")
                     
                 except Exception as e:
                     self.logger.error(f"监控持仓 {symbol} 发生异常: {e}")
@@ -989,20 +1013,8 @@ class BaseStrategy(ABC):
                             position_id=position.position_id
                         )
                         
-                        # 清理退出策略管理器中与该仓位相关的资源
-                        position_id = position.position_id
-                        for strategy in self.exit_strategy_manager.strategies.values():
-                            if hasattr(strategy, 'clean_symbol_resources'):
-                                strategy.clean_symbol_resources(symbol, position_id)
-                                self.logger.debug(f"已清理退出策略管理器中的仓位资源: {symbol}, position_id: {position_id}")
-                        
-                        # 通知风控系统完全平仓 (确保计数器正确更新)
-                        if hasattr(self.position_mgr, 'risk_controller'):
-                            self.position_mgr.risk_controller.record_close_position(symbol, is_partial_close=False)
-                            self.logger.debug(f"已通知风控系统完全平仓: {symbol}")
-
-                        # 更新平仓数据
-                        self._start_position_update_task(position.pos_id, symbol)
+                        # 不再需要直接调用_execute_position_cleanup，monitor_positions会处理
+                        await self._execute_position_cleanup(position=position, exit_price=current_price)
                     else:
                         # 从api获取仓位信息 部分平仓时 无需更新平仓价格，已实现盈亏 = api已实现盈亏 + api卖出手续费 + 之前缓存的已实现盈亏
                         pos_data = await self.data_cache.get_position_data(symbol, force_update=True)
@@ -1069,10 +1081,6 @@ class BaseStrategy(ABC):
                         self.logger.error(f"获取平仓信息异常: {e}")
                         position.exit_price = current_price
                         position.close_price = current_price
-                    
-                    # 注意：此处我们启动任务，不等待其完成，这样可以更快地返回平仓结果
-                    self._start_position_update_task(position.pos_id, symbol)
-                    
                     # 更新数据库和风控
                     try:
                         # 传递position_id，确保关闭正确的仓位
@@ -1086,17 +1094,8 @@ class BaseStrategy(ABC):
                         )
                         self.logger.info(f"仓位已在数据库中标记为已平仓: {symbol}, position_id: {position.position_id}")
                         
-                        # 清理退出策略管理器中与该仓位相关的资源
-                        position_id = position.position_id
-                        for strategy in self.exit_strategy_manager.strategies.values():
-                            if hasattr(strategy, 'clean_symbol_resources'):
-                                strategy.clean_symbol_resources(symbol, position_id)
-                                self.logger.debug(f"已清理退出策略管理器中的仓位资源: {symbol}, position_id: {position_id}")
-                        
-                        # 通知风控系统平仓信息
-                        if hasattr(self.position_mgr, 'risk_controller'):
-                            self.position_mgr.risk_controller.record_close_position(symbol, is_partial_close=False)
-                            self.logger.debug(f"已通知风控系统全部平仓: {symbol}")
+                        # 不再需要直接调用_execute_position_cleanup，monitor_positions会处理
+                        await self._execute_position_cleanup(position=position, exit_price=position.exit_price)
                     except Exception as e:
                         self.logger.error(f"更新数据库或风控系统状态异常: {e}", exc_info=True)
                     
@@ -1481,6 +1480,79 @@ class BaseStrategy(ABC):
             
         # 初始化子类
         self._init_strategy()
+
+    async def _execute_position_cleanup(self, position: 'Position', exit_price: float, exit_timestamp: int = None) -> bool:
+        """
+        执行完整的仓位平仓清理流程
+        当退出策略返回need_cleanup=True的ExitSignal时使用
+
+        Args:
+            position: 需要清理的仓位对象
+            exit_price: 平仓价格
+            exit_timestamp: 平仓时间戳，如果未提供则使用当前时间
+
+        Returns:
+            bool: 是否成功清理
+        """
+        try:
+            symbol = position.symbol
+            position_id = position.position_id
+            self.logger.info(f"执行仓位 {symbol} (ID: {position_id}) 的完整平仓流程")
+            
+            # 1. 更新仓位状态
+            if hasattr(position, 'closed'):
+                position.closed = 1
+            if exit_timestamp is None:
+                exit_timestamp = int(time.time() * 1000)
+            if hasattr(position, 'close_time'):
+                position.close_time = exit_timestamp
+            if hasattr(position, 'exit_timestamp'):
+                position.exit_timestamp = exit_timestamp
+            
+            # 计算盈亏百分比
+            entry_price = position.entry_price
+            direction = position.direction
+            pnl_percentage = 0
+            if direction == "long":
+                pnl_percentage = (exit_price - entry_price) / entry_price * 100
+            else:  # short
+                pnl_percentage = (entry_price - exit_price) / entry_price * 100
+            
+            # 2. 通知仓位管理器该仓位已关闭
+            if self.position_mgr and hasattr(self.position_mgr, 'close_position'):
+                self.logger.info(f"通知仓位管理器 {symbol} (ID: {position_id}) 仓位已平仓")
+                self.position_mgr.close_position(
+                    symbol, 
+                    exit_price, 
+                    exit_timestamp,
+                    0,  # 实际盈亏金额未知，设为0
+                    pnl_percentage,
+                    position_id=position_id
+                )
+            
+            # 3. 通知风控系统完全平仓
+            if hasattr(self.position_mgr, 'risk_controller'):
+                self.position_mgr.risk_controller.record_close_position(symbol, is_partial_close=False)
+                self.logger.debug(f"已通知风控系统完全平仓: {symbol}")
+            
+            # 4. 启动仓位更新任务
+            pos_id = getattr(position, 'pos_id', None)
+            if pos_id:
+                self._start_position_update_task(pos_id, symbol)
+                self.logger.debug(f"已启动仓位更新任务: {symbol}, pos_id: {pos_id}")
+            
+            # 5. 清理所有退出策略的资源
+            for strategy in self.exit_strategy_manager.strategies.values():
+                if hasattr(strategy, 'clean_symbol_resources'):
+                    strategy.clean_symbol_resources(symbol, position_id)
+            self.logger.debug(f"已清理所有退出策略资源: {symbol}, position_id: {position_id}")
+            
+            self.logger.info(f"{symbol} 仓位清理完成，价格: {exit_price}, {'盈利' if pnl_percentage >= 0 else '亏损'}: {pnl_percentage:.2f}%")
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"执行仓位平仓清理流程失败: {e}", exc_info=True)
+            return False
 
 
 class TradingFramework:

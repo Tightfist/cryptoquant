@@ -1,5 +1,5 @@
 import logging
-from typing import Tuple, Optional
+from typing import Tuple, Optional, Dict, Any
 
 logger = logging.getLogger(__name__)
 
@@ -92,3 +92,34 @@ def calculate_order_size(
             logger.info(f"默认按张数下单: 保证金={position_usdt} USDT, 杠杆={leverage}, 张数={size}")
     
     return size, tgt_ccy 
+
+def get_price_precision(trader, symbol: str, is_spot: bool = False) -> int:
+    """
+    从交易所获取交易对的价格精度
+    
+    Args:
+        trader: 交易执行器，需要实现 get_contract_info 方法
+        symbol: 交易对，如 BTC-USDT-SWAP
+        is_spot: 是否为现货交易
+        
+    Returns:
+        int: 价格精度，即小数点后的位数
+    """
+    try:
+        # 从交易所获取合约/交易对信息
+        contract_info = trader.get_contract_info(symbol, is_spot)["data"][0]
+        
+        # 获取最小价格变动单位（tick size）
+        tick_size = contract_info.get('tickSz', '0.0001')  # 默认精度为4位
+        
+        # 计算精度（小数点后的位数）
+        if '.' in tick_size:
+            precision = len(tick_size.split('.')[1])
+        else:
+            precision = 0
+            
+        logger.debug(f"获取{symbol}价格精度: {precision}位小数 (tickSz={tick_size})")
+        return precision
+    except Exception as e:
+        logger.error(f"获取价格精度失败: {e}", exc_info=True)
+        return 4  # 默认返回4位精度作为备选 
