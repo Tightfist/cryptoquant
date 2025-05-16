@@ -320,7 +320,7 @@ class TradingViewSignalApp:
     
     async def _run_framework_forever(self):
         """运行框架监控任务的包装函数"""
-        await self.framework.run_forever(position_monitor_interval=2)
+        await self.framework.run_forever(position_monitor_interval=5)
     
     def _setup_tasks(self):
         """设置异步任务"""

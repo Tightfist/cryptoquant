@@ -1255,14 +1255,18 @@ class ATRBasedExitStrategy(ExitStrategy):
             float: ATR值，如果无法计算返回None
         """
         try:
-            # 获取K线数据
-            self.logger.debug(f"{symbol} 获取K线数据: 周期={self.atr_timeframe}, 数量={self.atr_period + 1}")
-            candles = await self._get_candle_data(symbol, self.atr_timeframe, self.atr_period + 1)
-            if not candles or len(candles) < self.atr_period + 1:
-                self.logger.warning(f"{symbol} K线数据不足，获取到 {len(candles) if candles else 0} 根K线, 需要 {self.atr_period + 1} 根")
+            # 获取K线数据，增加获取数量以稳定ATR计算
+            # 我们需要至少 atr_period 根K线来计算初始SMA，以及更多数据来平滑
+            num_candles_to_fetch = self.atr_period + 50 
+            self.logger.debug(f"{symbol} 获取K线数据用于ATR: 周期={self.atr_timeframe}, 数量={num_candles_to_fetch}")
+            candles = await self._get_candle_data(symbol, self.atr_timeframe, num_candles_to_fetch)
+            
+            # 确保有足够的K线数据
+            if not candles or len(candles) < self.atr_period:
+                self.logger.warning(f"{symbol} K线数据不足 {self.atr_period} 根，无法计算ATR (获取到 {len(candles) if candles else 0} 根)")
                 return None
             
-            self.logger.debug(f"{symbol} 成功获取 {len(candles)} 根K线数据")
+            self.logger.debug(f"{symbol} 成功获取 {len(candles)} 根K线数据用于ATR计算")
 
             # 将K线数据转换为DataFrame
             df = pd.DataFrame(candles, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'volccy', 'volccyquote', 'confirm'])
@@ -1272,21 +1276,48 @@ class ATRBasedExitStrategy(ExitStrategy):
 
             # 计算真实波动幅度（TR）
             df['previous_close'] = df['close'].shift(1)
-            df['tr1'] = df['high'] - df['low']
+            # 对于第一行，TR = high - low
+            df['tr1'] = df['high'] - df['low'] 
             df['tr2'] = abs(df['high'] - df['previous_close'])
             df['tr3'] = abs(df['low'] - df['previous_close'])
+            
+            # TR是三者中的最大值。对于第一根K线，由于previous_close是NaN，tr2和tr3会是NaN。
+            # .max(axis=1) 在这种情况下会正确处理，如果某列是NaN，它不会参与比较，除非所有列都是NaN。
+            # 我们需要确保第一行的TR是 high - low。
             df['true_range'] = df[['tr1', 'tr2', 'tr3']].max(axis=1)
+            df['true_range'].iloc[0] = df['high'].iloc[0] - df['low'].iloc[0] # 显式设置第一个TR
 
-            # 计算ATR（使用EMA）
-            df['atr'] = df['true_range'].ewm(span=self.atr_period, adjust=False).mean()
+            # 初始化ATR序列 (Series)
+            atr_series = pd.Series(index=df.index, dtype=float, name='atr')
 
-            atr_value = df['atr'].iloc[-1]
+            # 计算第一个ATR值：前atr_period个TR的简单移动平均(SMA)
+            # 这个值对应于第 atr_period-1 索引处（即第 atr_period 根K线）的ATR
+            if len(df['true_range']) >= self.atr_period:
+                initial_atr = df['true_range'].iloc[:self.atr_period].mean()
+                atr_series.iloc[self.atr_period - 1] = initial_atr
+            else:
+                # 如果数据不足以计算初始SMA，则无法继续 (理论上已被上面的长度检查覆盖)
+                self.logger.warning(f"{symbol} 数据不足以计算 {self.atr_period} 周期的初始ATR SMA")
+                return None
 
-            self.logger.info(f"{symbol} ATR计算完成: {atr_value:.6f}")
+            # 递归计算后续的ATR值 (Wilder's Smoothing)
+            # ATR_current = (ATR_previous * (N-1) + TR_current) / N
+            # N = self.atr_period
+            for i in range(self.atr_period, len(df)):
+                atr_series.iloc[i] = (atr_series.iloc[i-1] * (self.atr_period - 1) + df['true_range'].iloc[i]) / self.atr_period
+            
+            df['atr'] = atr_series # 将计算得到的ATR序列添加到DataFrame
+            atr_value = df['atr'].iloc[-1] # 取最新的ATR值
+
+            if pd.isna(atr_value):
+                self.logger.warning(f"{symbol} 计算得到的ATR值为NaN，可能由于数据不足或计算问题。检查TR值和ATR计算过程。DataFrame尾部：\n{df.tail()}")
+                return None
+
+            self.logger.info(f"{symbol} ATR (SMA初始化+Wilder平滑) 计算完成: {atr_value:.6f}")
             return atr_value
             
         except Exception as e:
-            self.logger.error(f"计算ATR异常: {e}", exc_info=True)
+            self.logger.error(f"{symbol} 计算ATR异常 (SMA初始化+Wilder平滑): {e}", exc_info=True)
             return None
     
     async def _get_candle_data(self, symbol: str, timeframe: str, count: int) -> List:

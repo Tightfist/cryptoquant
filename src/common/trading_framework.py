@@ -780,17 +780,28 @@ class BaseStrategy(ABC):
                         trailing_distance = trailing_distance / position.leverage
 
                     # 更新最高/最低价格
+                    position_updated = False
                     if direction == "long":
                         # 多头情况下更新最高价
-                        if mark_price > position.high_price:
+                        if position.high_price is None or mark_price > position.high_price: # position.high_price should be initialized to entry_price or a valid value
                             position.high_price = mark_price
                             self.logger.info(f"{symbol} 创新高: {mark_price}")
+                            position_updated = True
                     else:  # short
-                        # 空头情况下更新最低价
-                        if mark_price < position.low_price or position.low_price == 0:
+                        # 空头情况下更新最低价. position.low_price might be initialized to 0 or float('inf')
+                        if position.low_price is None or mark_price < position.low_price or position.low_price == 0 or position.low_price == float('inf'):
                             position.low_price = mark_price
                             self.logger.info(f"{symbol} 创新低: {mark_price}")
+                            position_updated = True
                     
+                    if position_updated and hasattr(self, 'position_mgr') and self.position_mgr:
+                        try:
+                            # Assuming save_position is synchronous. If async, use await.
+                            self.position_mgr.save_position(position)
+                            self.logger.debug(f"保存仓位 {symbol} 更新后的最高/最低价. High: {getattr(position, 'high_price', 'N/A')}, Low: {getattr(position, 'low_price', 'N/A')}")
+                        except Exception as e:
+                            self.logger.error(f"保存仓位 {symbol} 最高/最低价失败: {e}", exc_info=True)
+
                     # 使用退出策略管理器检查是否满足平仓条件
                     # 修复：创建能处理部分平仓的回调函数
                     async def execute_close_callback(symbol, position, close_percentage=1.0):

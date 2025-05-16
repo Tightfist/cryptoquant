@@ -148,7 +148,7 @@ class OKExTrader(ExchangeAdapter):
             "instId": inst_id,
             "tdMode": "cross",
             "side": side,
-            "posSide": pos_side,
+            #"posSide": pos_side,
             "ordType": ord_type,
             "sz": str(sz),
         }

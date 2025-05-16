@@ -92,7 +92,7 @@
             <div class="col-md-3">
                 <div class="card text-white bg-info">
                     <div class="card-body">
-                        <h5 class="card-title">今日总盈亏</h5>
+                        <h5 class="card-title">今日已实现盈亏</h5>
                         <p class="card-text" id="todayPnl">加载中...</p>
                     </div>
                 </div>
@@ -125,8 +125,6 @@
                                         <th>杠杆</th>
                                         <th>入场价</th>
                                         <th>当前价</th>
-                                        <th>止盈价</th>
-                                        <th>止损价</th>
                                         <th>浮动盈亏</th>
                                         <th>已实现盈亏</th>
                                         <th>止盈进度</th>
@@ -134,7 +132,7 @@
                                 </thead>
                                 <tbody>
                                     <tr>
-                                        <td colspan="11" class="text-center">载入中...</td>
+                                        <td colspan="9" class="text-center">载入中...</td>
                                     </tr>
                                 </tbody>
                             </table>
@@ -165,7 +163,7 @@
                             <th>出场价</th>
                             <th>数量</th>
                             <th>杠杆</th>
-                            <th>盈亏(USDT/百分比)</th>
+                            <th>盈亏(USDT)</th>
                             <th>持仓时间</th>
                         </tr>
                     </thead>
@@ -668,7 +666,7 @@
                     <td>${position.exit_price}</td>
                     <td>${Math.abs(position.quantity)}</td>
                     <td>${position.leverage}x</td>
-                    <td class="${pnlClass}">${pnlAmount} (${pnlPercentage}%)</td>
+                    <td class="${pnlClass}">${pnlAmount}</td>
                     <td>${position.holding_time || formatHoldingTime(position.entry_timestamp || position.timestamp, position.exit_timestamp)}</td>
                 </tr>`;
                 
@@ -750,7 +748,7 @@
                     <td>${rowData.exit_price}</td>
                     <td>${Math.abs(rowData.quantity)}</td>
                     <td>${rowData.leverage}x</td>
-                    <td class="${pnlClass}">${pnlAmount} (${pnlPercentage}%)</td>
+                    <td class="${pnlClass}">${pnlAmount}</td>
                     <td>${rowData.holding_time || formatHoldingTime(rowData.entry_timestamp || rowData.timestamp, rowData.exit_timestamp)}</td>
                 `;
             });
@@ -1464,7 +1462,7 @@
                     if (positions.length === 0) {
                         $('#positionsTable tbody').html(`
                             <tr>
-                                <td colspan="11" class="text-center">
+                                <td colspan="9" class="text-center">
                                     没有持仓数据
                                 </td>
                             </tr>
@@ -1481,7 +1479,7 @@
                     console.error('加载持仓失败:', data.message || '未知错误');
                     $('#positionsTable tbody').html(`
                         <tr>
-                            <td colspan="11" class="text-center text-danger">
+                            <td colspan="9" class="text-center text-danger">
                                 加载失败: ${data.message || '未知错误'}
                             </td>
                         </tr>
@@ -1496,7 +1494,7 @@
                 console.error('加载持仓异常:', error);
                 $('#positionsTable tbody').html(`
                     <tr>
-                        <td colspan="11" class="text-center text-danger">
+                        <td colspan="9" class="text-center text-danger">
                             加载异常: ${error.message || '未知错误'}
                         </td>
                     </tr>
@@ -1555,7 +1553,7 @@
             if (!positions || !Array.isArray(positions) || positions.length === 0) {
                 $('#positionsTable tbody').html(`
                     <tr>
-                        <td colspan="11" class="text-center">
+                        <td colspan="9" class="text-center">
                             当前没有持仓
                         </td>
                     </tr>
@@ -1649,8 +1647,6 @@
                         <td>${pos.leverage || 1}x</td>
                         <td>${formatPrice(pos.entry_price)}</td>
                         <td>${formatPrice(pos.last_price || pos.current_price)}</td>
-                        <td class="text-success">${takeProfitPrice}</td>
-                        <td class="text-danger">${stopLossPrice}</td>
                         <td>${formatPnL(pos.unrealized_pnl)}</td>
                         <td>${formatPnL(realizedPnl)}</td>
                         <td>${ladderProgress}</td>
@@ -1661,7 +1657,7 @@
             if (tableHtml === '') {
                 $('#positionsTable tbody').html(`
                     <tr>
-                        <td colspan="11" class="text-center">
+                        <td colspan="9" class="text-center">
                             持仓数据解析错误，请检查控制台日志
                         </td>
                     </tr>
@@ -1854,14 +1850,6 @@
                                 <div class="col-6">
                                     <p class="card-text"><small>杠杆</small><br><span class="fs-5">${pos.leverage || 1}x</span></p>
                                 </div>
-                            </div>
-                            <div class="row mt-3">
-                                <div class="col-6">
-                                    <p class="card-text"><small>止盈价</small><br><span class="fs-5 text-success">${takeProfitPrice}</span></p>
-                                </div>
-                                <div class="col-6">
-                                    <p class="card-text"><small>止损价</small><br><span class="fs-5 text-danger">${stopLossPrice}</span></p>
-                            </div>
                             </div>
                             <div class="row mt-3">
                                 <div class="col-6">
