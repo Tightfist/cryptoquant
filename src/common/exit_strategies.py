@@ -1257,7 +1257,7 @@ class ATRBasedExitStrategy(ExitStrategy):
         try:
             # 获取K线数据，增加获取数量以稳定ATR计算
             # 我们需要至少 atr_period 根K线来计算初始SMA，以及更多数据来平滑
-            num_candles_to_fetch = self.atr_period + 50 
+            num_candles_to_fetch = self.atr_period + 10 
             self.logger.debug(f"{symbol} 获取K线数据用于ATR: 周期={self.atr_timeframe}, 数量={num_candles_to_fetch}")
             candles = await self._get_candle_data(symbol, self.atr_timeframe, num_candles_to_fetch)
             

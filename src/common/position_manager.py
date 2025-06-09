@@ -1095,7 +1095,7 @@ class PositionManager:
             if 'posSide' in api_position and api_position['posSide']:
                 api_direction = api_position['posSide']  # API中的posSide就是方向: long或short
                 # 如果API返回的方向与本地不同，需要更新
-                if api_direction != position.direction:
+                if api_direction != position.direction and api_direction != "net":
                     self.logger.warning(f"{symbol} 持仓方向与API不一致: 本地={position.direction}, API={api_direction}")
                     # 更新方向
                     position.direction = api_direction

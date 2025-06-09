@@ -1794,23 +1794,23 @@ class TradingFramework:
                 stop_loss_pct = signal.stop_loss_pct if signal and hasattr(signal, 'stop_loss_pct') and signal.stop_loss_pct is not None else self.strategy.stop_loss_pct
                 
                 # 记录原始止盈止损比例 (Web界面计算)
-                self.logger.info(f"【Web界面】{symbol} 原始止盈止损比例: 止盈={take_profit_pct*100:.2f}%, 止损={stop_loss_pct*100:.2f}%")
+                #self.logger.info(f"【Web界面】{symbol} 原始止盈止损比例: 止盈={take_profit_pct*100:.2f}%, 止损={stop_loss_pct*100:.2f}%")
                 
                 # 如果有杠杆，调整百分比（与开仓逻辑一致）
-                if position.leverage > 1:
-                    take_profit_pct = take_profit_pct / position.leverage
-                    stop_loss_pct = stop_loss_pct / position.leverage
-                    self.logger.info(f"【Web界面】{symbol} 杠杆调整后止盈止损比例: 止盈={take_profit_pct*100:.2f}%, 止损={stop_loss_pct*100:.2f}%")
+                #if position.leverage > 1:
+                    #take_profit_pct = take_profit_pct / position.leverage
+                    #stop_loss_pct = stop_loss_pct / position.leverage
+                    #self.logger.info(f"【Web界面】{symbol} 杠杆调整后止盈止损比例: 止盈={take_profit_pct*100:.2f}%, 止损={stop_loss_pct*100:.2f}%")
                 
                 # 计算实际止盈止损价格
-                if position.direction == "long":
-                    take_profit_price = position.entry_price * (1 + take_profit_pct)
-                    stop_loss_price = position.entry_price * (1 - stop_loss_pct)
-                else:  # short
-                    take_profit_price = position.entry_price * (1 - take_profit_pct)
-                    stop_loss_price = position.entry_price * (1 + stop_loss_pct)
+                #if position.direction == "long":
+                    #take_profit_price = position.entry_price * (1 + take_profit_pct)
+                    #stop_loss_price = position.entry_price * (1 - stop_loss_pct)
+                #else:  # short
+                    #take_profit_price = position.entry_price * (1 - take_profit_pct)
+                    #stop_loss_price = position.entry_price * (1 + stop_loss_pct)
                 
-                self.logger.info(f"【Web界面】{symbol} 计算的止盈止损价格: 入场={position.entry_price:.4f}, 止盈={take_profit_price:.4f}, 止损={stop_loss_price:.4f}")
+                #self.logger.info(f"【Web界面】{symbol} 计算的止盈止损价格: 入场={position.entry_price:.4f}, 止盈={take_profit_price:.4f}, 止损={stop_loss_price:.4f}")
                 
                 # 更新计算的PnL数据
                 current_price = mark_price
