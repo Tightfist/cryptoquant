@@ -839,7 +839,7 @@ DEFAULT_HOST="localhost"
 DEFAULT_PORT="{{PORT}}"
 DEFAULT_START_DATE=$(date -d "30 days ago" +%Y-%m-%d)
 DEFAULT_END_DATE=$(date +%Y-%m-%d)
-DEFAULT_LIMIT=100
+DEFAULT_LIMIT=""
 
 # 显示用法信息
 function show_usage {
@@ -853,7 +853,7 @@ function show_usage {
     echo "  -s, --start-date <日期>    开始日期，格式为YYYY-MM-DD (默认: $DEFAULT_START_DATE)"
     echo "  -e, --end-date <日期>      结束日期，格式为YYYY-MM-DD (默认: $DEFAULT_END_DATE)"
     echo "  -y, --symbol <交易对>      交易对，例如BTC-USDT-SWAP (默认: 所有交易对)"
-    echo "  -l, --limit <数量>         最大返回记录数 (默认: $DEFAULT_LIMIT)"
+    echo "  -l, --limit <数量>         最大返回记录数 (可选，不指定则返回所有)"
     echo "  -f, --format <格式>        输出格式: json或table (默认: table)"
     echo "  --help                     显示此帮助信息"
     echo ""
@@ -937,9 +937,12 @@ if ! [[ $END_DATE =~ $date_regex ]]; then
 fi
 
 # 构建URL
-URL="http://$HOST:$PORT{{BASE_PATH}}/api/position_history?start_date=$START_DATE&end_date=$END_DATE&limit=$LIMIT"
+URL="http://$HOST:$PORT{{BASE_PATH}}/api/position_history?start_date=$START_DATE&end_date=$END_DATE"
 if [[ -n "$SYMBOL" ]]; then
     URL="${URL}&symbol=$SYMBOL"
+fi
+if [[ -n "$LIMIT" ]]; then
+    URL="${URL}&limit=$LIMIT"
 fi
 
 # 发送请求
@@ -963,30 +966,69 @@ if [[ "$FORMAT" == "json" ]]; then
     echo "$RESPONSE" | python3 -m json.tool
 else
     # 表格格式输出
-    echo "仓位历史数据:"
-    echo "=============================================================================="
-    echo "交易对      | 方向 | 入场价格  | 平仓价格  | 收益(USDT) | 收益率(%) | 持仓时间"
-    echo "------------------------------------------------------------------------------"
+    echo "仓位历史数据 (时间范围: $START_DATE 至 $END_DATE):"
+    echo "========================================================================================="
+    echo "交易对       | 方向 | 入场价格 | 平仓价格 | 收益(USDT) | 收益率(%) | 持仓时间 | 平仓时间"
+    echo "-----------------------------------------------------------------------------------------"
     
     # 使用Python解析JSON并格式化输出
     python3 -c "
 import json, sys
+from datetime import datetime
+
 data = json.loads(sys.stdin.read())
 if 'data' in data and data['data']:
-    for item in data['data']:
+    items = data['data']
+    total_count = len(items)
+    profitable_count = sum(1 for item in items if item.get('pnl_amount', 0) > 0)
+    win_rate = (profitable_count / total_count * 100) if total_count > 0 else 0
+    total_pnl = sum(item.get('pnl_amount', 0) for item in items)
+    
+    print(f'查询结果统计: 总交易数={total_count}, 盈利交易数={profitable_count}, 胜率={win_rate:.1f}%, 总盈亏={total_pnl:.2f} USDT')
+    print()
+    
+    for i, item in enumerate(items, 1):
         symbol = item.get('symbol', 'N/A')
         direction = item.get('direction', 'N/A')
+        direction_cn = '多' if direction == 'long' else '空' if direction == 'short' else direction
         entry_price = item.get('entry_price', 0)
         exit_price = item.get('exit_price', 0)
         pnl_amount = item.get('pnl_amount', 0)
         pnl_percentage = item.get('pnl_percentage', 0)
+        
+        # 处理持仓时间
         holding_time = item.get('holding_time', 'N/A')
-        print(f'{symbol:11} | {direction:4} | {entry_price:9.2f} | {exit_price:9.2f} | {pnl_amount:10.2f} | {pnl_percentage:9.2f} | {holding_time}')
+        if holding_time == 'N/A':
+            # 尝试从时间戳计算
+            entry_ts = item.get('entry_timestamp') or item.get('timestamp')
+            exit_ts = item.get('exit_timestamp')
+            if entry_ts and exit_ts:
+                duration_seconds = (exit_ts - entry_ts) / 1000
+                hours = int(duration_seconds // 3600)
+                minutes = int((duration_seconds % 3600) // 60)
+                holding_time = f'{hours}h{minutes}m'
+        
+        # 处理退出时间显示
+        exit_time = item.get('exit_time', '')
+        if not exit_time and item.get('exit_timestamp'):
+            try:
+                exit_time = datetime.fromtimestamp(item['exit_timestamp'] / 1000).strftime('%m-%d %H:%M')
+            except:
+                exit_time = 'N/A'
+        elif exit_time and len(exit_time) > 16:
+            # 简化时间显示，只显示月-日 时:分
+            try:
+                dt = datetime.strptime(exit_time[:19], '%Y-%m-%d %H:%M:%S')
+                exit_time = dt.strftime('%m-%d %H:%M')
+            except:
+                pass
+        
+        print(f'{symbol:12} | {direction_cn:2} | {entry_price:8.2f} | {exit_price:8.2f} | {pnl_amount:9.2f} | {pnl_percentage:8.2f}% | {holding_time:8} | {exit_time}')
 else:
     print('没有仓位历史数据')
 " <<< "$RESPONSE"
     
-    echo "=============================================================================="
+    echo "========================================================================================="
 fi
 
 echo "完成!"

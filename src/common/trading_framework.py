@@ -1366,7 +1366,7 @@ class BaseStrategy(ABC):
         return result
     
     async def get_position_history(self, start_date: str = None, end_date: str = None, 
-                            symbol: str = None, limit: int = 100) -> List[Dict]:
+                            symbol: str = None, limit: int = None) -> List[Dict]:
         """
         获取历史仓位记录
         
@@ -1374,7 +1374,7 @@ class BaseStrategy(ABC):
             start_date: 开始日期，格式为 YYYY-MM-DD，默认为30天前
             end_date: 结束日期，格式为 YYYY-MM-DD，默认为今天
             symbol: 交易对，默认为所有
-            limit: 最大返回记录数，默认100条
+            limit: 最大返回记录数，如果不指定则不限制
             
         Returns:
             List[Dict]: 历史仓位记录列表
@@ -1897,7 +1897,7 @@ class TradingFramework:
         return await self.strategy.get_daily_pnl(start_date, end_date)
     
     async def get_position_history(self, start_date: str = None, end_date: str = None, 
-                                  symbol: str = None, limit: int = 100) -> List[Dict]:
+                                  symbol: str = None, limit: int = None) -> List[Dict]:
         """
         获取历史仓位记录
         
@@ -1905,7 +1905,7 @@ class TradingFramework:
             start_date: 开始日期，格式为 YYYY-MM-DD，默认为30天前
             end_date: 结束日期，格式为 YYYY-MM-DD，默认为今天
             symbol: 交易对，默认为所有
-            limit: 最大返回记录数，默认100条
+            limit: 最大返回记录数，如果不指定则不限制
             
         Returns:
             List[Dict]: 历史仓位记录列表

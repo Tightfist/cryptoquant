@@ -313,27 +313,33 @@ class TradingFrameworkApiHandler:
             # 获取请求信息
             request_id = id(request)
             
-            # 获取今天的日期范围
-            from datetime import datetime
-            today = datetime.now().strftime("%Y-%m-%d")
-            
             # 获取查询参数
             params = request.query
+            start_date = params.get('start_date')
+            end_date = params.get('end_date')
             symbol = params.get('symbol')
-            limit_str = params.get('limit', '100')
+            limit_str = params.get('limit')
             
-            # 转换limit为整数
-            try:
-                limit = int(limit_str)
-            except ValueError:
-                limit = 100
+            # 如果没有指定日期，使用今天的日期
+            if not start_date or not end_date:
+                today = datetime.datetime.now().strftime("%Y-%m-%d")
+                start_date = start_date or today
+                end_date = end_date or today
+            
+            # 处理limit参数：如果用户指定了limit则使用，否则不限制
+            limit = None
+            if limit_str:
+                try:
+                    limit = int(limit_str)
+                except ValueError:
+                    limit = None
             
             # 记录查询参数
-            self.logger.info(f"[请求ID:{request_id}] 历史仓位查询: date={today}, symbol={symbol}, limit={limit}")
+            self.logger.info(f"[请求ID:{request_id}] 历史仓位查询: start_date={start_date}, end_date={end_date}, symbol={symbol}, limit={limit}")
             
             # 执行实际查询
             position_history = await self.framework.get_position_history(
-                today, today, symbol, limit
+                start_date, end_date, symbol, limit
             )
             
             if position_history is None:
@@ -343,7 +349,7 @@ class TradingFrameworkApiHandler:
             response_data = {
                 "success": True,
                 "data": position_history,
-                "timestamp": int(datetime.now().timestamp()),
+                "timestamp": int(datetime.datetime.now().timestamp()),
                 "count": len(position_history)
             }
             self.logger.info(f"[请求ID:{request_id}] 历史仓位响应: count={len(position_history)}")
@@ -351,9 +357,8 @@ class TradingFrameworkApiHandler:
         except Exception as e:
             request_id = id(request) if hasattr(request, 'id') else 'unknown'
             self.logger.exception(f"[请求ID:{request_id}] 处理仓位历史查询API异常: {e}")
-            from datetime import datetime
             return web.json_response(
-                {"success": False, "message": f"处理异常: {e}", "timestamp": int(datetime.now().timestamp()), "data": []},
+                {"success": False, "message": f"处理异常: {e}", "timestamp": int(datetime.datetime.now().timestamp()), "data": []},
                 status=200  # 即使出错也返回200状态码而不是500，让前端能正常处理
             )
     

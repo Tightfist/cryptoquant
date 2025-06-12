@@ -809,7 +809,7 @@ class PositionManager:
             
             return results
     
-    def get_position_history(self, start_date=None, end_date=None, symbol=None, limit=100):
+    def get_position_history(self, start_date=None, end_date=None, symbol=None, limit=None):
         """
         获取已平仓的历史仓位
         
@@ -817,7 +817,7 @@ class PositionManager:
             start_date (str, optional): 开始日期 "YYYY-MM-DD"
             end_date (str, optional): 结束日期 "YYYY-MM-DD"
             symbol (str, optional): 交易对
-            limit (int, optional): 返回记录数量限制
+            limit (int, optional): 返回记录数量限制，如果不指定则不限制
             
         Returns:
             list: 历史仓位列表
